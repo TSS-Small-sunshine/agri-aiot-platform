@@ -1,0 +1,92 @@
+# ==============================================================================
+# GitHub Actions —— 构建并推送两个镜像到 ghcr.io
+#   ghcr.io/<owner>/agri-aiot-platform:latest          （后端 + 前端静态产物）
+#   ghcr.io/<owner>/agri-aiot-platform-simulator:latest（MQTT 模拟器）
+#
+# 设计要点（对应 CHANGELOG 难点一）：
+#   把镜像构建从 2C2G 小服务器搬到 GitHub Actions，服务器只 pull 不 build，
+#   彻底规避 OOM Killer；同时用 gha 缓存避免重复安装依赖。
+#
+# 服务器侧只需（公开包可直接拉；私有包需先 docker login ghcr.io）：
+#   docker compose pull && docker compose up -d
+# ==============================================================================
+
+name: build-and-push
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# 只读代码 + 可写包（推 ghcr.io 必需）
+permissions:
+  contents: read
+  packages: write
+
+# 同一分支的并发构建只保留最新一次，避免排队浪费
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            image_suffix: ""
+            dockerfile: backend/Dockerfile
+          - name: simulator
+            image_suffix: "-simulator"
+            dockerfile: simulator/Dockerfile
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # buildx 是 build-push-action 的前置；gha 缓存也需要它
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GITHUB_TOKEN 自带 packages:write 权限，无需额外配置 secret
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 镜像名统一小写：ghcr.io 要求仓库名全小写，GitHub 用户名可能含大写
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/agri-aiot-platform${{ matrix.image_suffix }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.title=agri-aiot-platform${{ matrix.image_suffix }}
+            org.opencontainers.image.description=智慧农业 AIoT 平台 ${{ matrix.name }} 镜像
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          # 阿里云轻量 2C2G 是 x86_64；只构建 amd64 可显著缩短构建时间与缓存体积
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # gha 缓存：把构建层缓存在 Actions 缓存里，二次构建通常快数倍
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: false

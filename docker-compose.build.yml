@@ -1,0 +1,24 @@
+# ==============================================================================
+# 本地/自建镜像覆盖文件（可选）—— 用 build: 覆盖 image:，构建上下文 = 仓库根目录
+#
+# 用法（必须同时指定两个文件，后一个覆盖前一个）：
+#     docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# 说明：
+#   - 只在本机或内存充足的机器上用；2C2G 小服务器请改用 GitHub Actions 构建好的镜像
+#     （见 README「方案 C」的内存优化技巧：加 swap / 限制 buildkit 并发）
+#   - 构建上下文必须是仓库根目录：backend/Dockerfile 需要同时拿到 frontend/ 做多阶段构建
+# ==============================================================================
+
+services:
+  backend:
+    image: ${IMAGE_REGISTRY:-ghcr.io/tss-small-sunshine}/agri-aiot-platform:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+
+  simulator:
+    image: ${IMAGE_REGISTRY:-ghcr.io/tss-small-sunshine}/agri-aiot-platform-simulator:latest
+    build:
+      context: .
+      dockerfile: simulator/Dockerfile

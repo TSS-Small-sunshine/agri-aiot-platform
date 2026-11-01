@@ -1,0 +1,103 @@
+# ==============================================================================
+# 智慧农业 AIoT 平台 —— Docker Compose（默认：拉取 ghcr.io 预构建镜像）
+#
+# 服务器（阿里云轻量 2C2G / Ubuntu 22.04·24.04·26.04，26.04 已实测）零构建启动：
+#     cp .env.example .env
+#     docker compose pull
+#     docker compose up -d
+#
+# 想在本机自己构建镜像（需要 Docker，且建议 ≥4G 内存）：
+#     docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# 镜像仓库可替换（默认 ghcr.io/tss-small-sunshine），在 shell 里导出即可：
+#     export IMAGE_REGISTRY=ghcr.io/<你的GitHub用户名或组织>
+#
+# 服务与端口遵循 docs/CONTRACT.md 第 8 节：
+#   - backend 容器 8000 -> 宿主机 8000（前端由后端同端口托管，无独立前端容器）
+#   - mosquitto 1883 仅容器内网可达，不映射到宿主机
+#   - 服务名固定为 backend / mosquitto / simulator，数据卷 agri-data 挂载到 /data
+# ==============================================================================
+
+name: agri-aiot-platform
+
+services:
+  # ---------------------------------------------------------------------------
+  # MQTT Broker：只在内网暴露，不对公网开放（安全组也无需放行 1883）
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: agri-mosquitto
+    restart: unless-stopped
+    volumes:
+      # 配置文件只读挂载；该文件由后端负责人维护（契约第 1 节）
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      # 持久化消息存储与日志
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    expose:
+      - "1883"          # 仅容器网络内可见，不写 ports 即不会映射到宿主机
+    networks:
+      - agri-net
+
+  # ---------------------------------------------------------------------------
+  # 后端（FastAPI + SQLite/WAL，同时托管前端静态产物）
+  # ---------------------------------------------------------------------------
+  backend:
+    image: ${IMAGE_REGISTRY:-ghcr.io/tss-small-sunshine}/agri-aiot-platform:latest
+    container_name: agri-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - agri-data:/data
+      # 时区：python:3.12-slim 基础镜像**不含 tzdata**，只设 TZ=Asia/Shanghai 会解析失败
+      # 并静默退回 UTC（大屏时间差 8 小时）。直接挂宿主机的 /etc/localtime 最稳，
+      # 无需改镜像、无需装包；Ubuntu 宿主机必定存在该文件。
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      mosquitto:
+        condition: service_started
+    healthcheck:
+      # 用 python 而非 curl/wget：镜像基于 python 官方镜像，python 必然存在；
+      # urlopen 失败会抛异常 -> 非 0 退出码 -> 容器标记 unhealthy
+      test: ["CMD-SHELL", 'python -c "import urllib.request;urllib.request.urlopen(''http://127.0.0.1:8000/api/health'',timeout=3)"']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - agri-net
+
+  # ---------------------------------------------------------------------------
+  # 模拟器：定时向 mosquitto 发布遥测数据，让大屏在没有真实设备时也有数据
+  # ---------------------------------------------------------------------------
+  simulator:
+    image: ${IMAGE_REGISTRY:-ghcr.io/tss-small-sunshine}/agri-aiot-platform-simulator:latest
+    container_name: agri-simulator
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 容器内用 compose 服务名寻址 broker（覆盖 .env 里的同名值）
+      MQTT_HOST: mosquitto
+    volumes:
+      # 与 backend 保持同一时区，否则上报的 ts 与后端本地时区不一致
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - agri-net
+
+networks:
+  agri-net:
+    driver: bridge
+
+volumes:
+  # 业务数据（SQLite 库、上传物等）——升级容器不会丢数据
+  agri-data:
+  # mosquitto 的持久化数据与日志
+  mosquitto-data:
+  mosquitto-log:
