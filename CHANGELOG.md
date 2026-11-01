@@ -35,7 +35,7 @@
 - `scripts/seed_history.py`：灌入历史遥测数据（4 台设备 × 24h），让演示现场立刻有趋势曲线；告警由模拟器实时越界上报触发。
 - `docker-compose.yml`：三服务（mosquitto / backend / simulator），数据卷 `agri-data` 挂载 `/data`。
 - `docker-compose.build.yml`：本地构建覆盖文件，用 `build:` 覆盖 `image:`。
-- `.github/workflows/build-push.yml`：GitHub Actions 构建并推送两个镜像到 ghcr.io，启用 gha 缓存。
+- `.github/workflows/build-push.yml`：GitHub Actions 构建并推送两个镜像（后端 / 模拟器）到 ghcr.io，启用 gha 缓存；镜像命名空间用 `${GITHUB_REPOSITORY_OWNER,,}` 显式小写化（ghcr 要求仓库名小写；实测 `docker/metadata-action` 也会自行归一，显式写更抗上游行为变化）。
 - `scripts/dev_up.sh` / `scripts/dev_up.ps1`：裸机开发一键启动（建 venv、装依赖、构建前端、拷静态产物、起服务）。
 - 保姆级 `README.md` 与接口速查 `docs/API.md`。
 
@@ -44,7 +44,8 @@
 - `.env` 与数据库文件一律不入库；`.env.example` 提供全部 21 个环境变量的中文说明与可用默认值。
 - 所有可调参数走环境变量，代码零硬编码。
 - mosquitto 1883 仅在容器内网可达，不映射到宿主机，公网无暴露面。
-- **按目标服务器实测事实修正部署路径**：该机 `download.docker.com` / `registry-1.docker.io` / `github.com` 均不可达（HTTP 000），故改为 apt 装 `docker.io`+`docker-compose-v2`、配置 `docker.m.daocloud.io` 镜像加速、用 scp 传部署文件而非 `git clone`。
+- **按目标服务器实测事实修正部署路径**：该机 `download.docker.com` / `registry-1.docker.io` / `github.com` 均不可达；Docker 已装好（29.7.2 / compose v5.5.0），`/etc/docker/daemon.json` 已配 `https://<你的镜像加速地址>` 代理；部署改为 scp 传文件而非 `git clone`，并新增用国内 ghcr 代理（`<你的代理域名>`）匿名拉镜像。
+- **新增 `.dockerignore`**：两个 Dockerfile 的构建上下文都是仓库根目录，排除 `.venv`（35.3MB）、`frontend/node_modules`（100.6MB）、`dist`、`data`、`logs`、`.git`、`.github`、`*.db` 系列、`__pycache__`、`.env` 等无关内容，只保留构建真正依赖的路径。
 - **时区修正**：`python:3.12-slim` 基础镜像不含 tzdata，容器默认 UTC 会让大屏时间差 8 小时；compose 给 `backend` 与 `simulator` 挂载 `/etc/localtime:/etc/localtime:ro` 解决。
 
 ---
@@ -174,7 +175,7 @@ DOCKER_BUILDKIT=1 docker build \
 | 服务器构建耗时 | 失败 | 0 秒（只 `docker pull`） |
 | 后端镜像体积 | 约 1.1 GB（单阶段含 node） | 约 210 MB（多阶段 slim） |
 | 服务器可用内存 | 构建期间几乎归零 | 稳定剩余 1.2 GB 以上 |
-| 首次部署总耗时 | 失败重试多次 | 约 2 分钟（pull 两个镜像 + 起服务） |
+| 首次部署总耗时 | 失败重试多次 | 约 2 分钟（pull 三个镜像 + 起服务） |
 
 ### 一句话演讲口径
 

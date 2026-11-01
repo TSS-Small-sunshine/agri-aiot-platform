@@ -61,12 +61,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 镜像名统一小写：ghcr.io 要求仓库名全小写，GitHub 用户名可能含大写
+      # ghcr.io / Docker 要求仓库名全小写，而 GitHub 用户名可能是 `TSS-Small-sunshine`。
+      # 实测 docker/metadata-action 自身会做小写归一（原始写法 CI 也能成功，run 41321179965），
+      # 这里用 bash 的 ${VAR,,} 显式小写，是为了可读性与抗上游行为变化，而非修复缺陷。
+      - name: Compute lowercase image namespace
+        id: ns
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/agri-aiot-platform${{ matrix.image_suffix }}
+          images: ${{ env.REGISTRY }}/${{ steps.ns.outputs.owner }}/agri-aiot-platform${{ matrix.image_suffix }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=branch

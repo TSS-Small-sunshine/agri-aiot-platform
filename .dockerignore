@@ -1,0 +1,84 @@
+# ==============================================================================
+# .dockerignore —— 两个 Dockerfile 的构建上下文都是**仓库根目录**
+#
+# 实际被 COPY 的路径（改动本文件前请先核对这两行）：
+#   backend/Dockerfile   : frontend/（整目录）、backend/requirements.txt、backend/app
+#   simulator/Dockerfile : simulator/requirements.txt、simulator/mock_sensor.py
+#
+# 目的：构建上下文只保留构建真正需要的文件。
+# 本仓库无关大目录实测体积：frontend/node_modules 100.6MB、.venv 35.3MB、data 4.3MB。
+#
+# 规则生效顺序：先排除、后反选（! 开头）。最后的「必须保留」段是对将来新增规则的护栏。
+# ==============================================================================
+
+# ---------- 版本控制（构建不需要）----------
+.git
+
+# ---------- Python 虚拟环境 / 字节码 / 缓存 ----------
+.venv
+**/.venv
+venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# ---------- Node（Dockerfile 内会 rm -rf node_modules && npm ci 重新装）----------
+**/node_modules
+**/dist
+**/.vite
+**/npm-debug.log*
+**/yarn-error.log*
+**/pnpm-debug.log*
+
+# ---------- 运行期数据（绝不进镜像）----------
+data
+logs
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.db-journal
+**/*.log
+
+# ---------- 环境变量与密钥（.env.example 见下方反选）----------
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+
+# ---------- CI（构建不需要；CI 自己 checkout 代码后单独 docker build）----------
+.github
+
+# ---------- mosquitto：仅 compose 运行期只读挂载用，不是构建产物 ----------
+# 依据：两个 Dockerfile 均未 COPY mosquitto/ 下任何文件；compose 的
+#   ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+# 是 bind mount，运行时由宿主机文件系统直接提供，不经过构建上下文。
+# 若将来新增「构建 mosquitto 镜像」的需求，删掉下面这一行即可。
+mosquitto
+
+# ---------- IDE ----------
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# ==============================================================================
+# 必须保留 —— 构建真正依赖的路径，显式反选，防止将来新增规则误伤
+# （刻意只反选具体文件/叶子路径：反选目录会因 docker 的父目录匹配规则
+#   把该目录下已被排除的内容重新放回，例如 !backend/app 会带回 __pycache__）
+# ==============================================================================
+!.env.example
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/vite.config.js
+!frontend/src/**
+!backend/requirements.txt
+!simulator/requirements.txt
+!simulator/mock_sensor.py

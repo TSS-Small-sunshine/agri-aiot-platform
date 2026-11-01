@@ -14,7 +14,7 @@
 - [3. 技术栈](#3-技术栈)
 - [4. 系统架构](#4-系统架构)
 - [5. 目录结构](#5-目录结构)
-- [6. 方案 A：Docker 部署到阿里云轻量 2C2G（主线）](#6-方案-a-docker-部署到阿里云轻量-2c2g主线)
+- [6. 方案 A：Docker 部署到阿里云轻量 2C2G（主线）](#6-方案-adocker-部署到阿里云轻量-2c2g主线)
 - [7. 方案 B：本地裸机开发](#7-方案-b本地裸机开发)
 - [8. 方案 C：自己构建镜像](#8-方案-c自己构建镜像)
 - [9. 大模型配置](#9-大模型配置)
@@ -222,18 +222,22 @@ agri-aiot-platform/
 | 项 | 实测值 |
 |---|---|
 | 系统 | Ubuntu **26.04 LTS** (resolute)，x86_64，2 核（22.04 / 24.04 同样适用） |
-| 内存 | 总 **1735MB**，可用约 **1029MB**，**自带 4GB swap**（`/swapfile` 已启用） |
-| `download.docker.com` | ❌ **HTTP 000 不通** → 不能用官方脚本装 Docker，改 apt 装 `docker.io` |
-| `registry-1.docker.io` | ❌ **HTTP 000 不通** → **必须**配 `registry-mirrors`，否则拉不到任何镜像 |
-| `github.com` | ❌ **HTTP 000 不通** → **不能**在服务器上 `git clone`，改用 scp 传文件 |
-| `ghcr.io` | ✅ 可达（匿名 401 = 可拉公共镜像）→ CI 产物可直接 `pull` |
-| `api.github.com` / `codeload.github.com` | ✅ 200 / 301（仅在必须取代码时走 tarball） |
-| 可用加速器 | ✅ `https://docker.m.daocloud.io`（`/v2/` 返回 401 = 可达） |
+| 内存 / 磁盘 | MemTotal **1820073984 B**（约 1735MB，可用约 998MB）；**已自带 4GB swap**（`/swapfile` 已启用）；磁盘 40G 用 21% |
+| **Docker** | ✅ **已安装且已运行**：`Docker version 29.7.2, build a7dcaa6`、`Docker Compose version v5.5.0`、`systemctl is-active docker` → **active**；驱动 overlayfs、cgroup v2 |
+| **daemon.json** | ✅ **已配好**：`{"registry-mirrors":["https://<你的镜像加速地址>"]}` |
+| ghcr 代理 | ✅ `https://<你的代理域名>/v2/` → **200**（**匿名可拉公共镜像**，实测 `docker pull .../linuxcontainers/alpine:latest` → Pull complete） |
+| Docker Hub 代理 | ✅ `https://<你的镜像加速地址>/v2/` → **200** |
+| `ghcr.io` 直连 | ⚠️ `/v2/` → 401，但其匿名 token 接口 → **403** → 直连拉取不可靠，**走上面的 ghcr 代理** |
+| `registry-1.docker.io` | ❌ **不通**（靠 Docker Hub 代理绕行） |
+| `github.com` | ❌ **不通** → **不能**在服务器上 `git clone`，改用 scp 传文件 |
+| `download.docker.com` | ❌ **不通** → 不要用官方 `get.docker.com` 脚本（本机已装好，无需再装） |
+| 备用加速器 | ✅ `https://docker.m.daocloud.io`（`/v2/` 返回 401 = 可达），仅当上面的代理失效时改用 |
 | 不可用加速器 | ❌ dockerproxy.com、mirror.ccs.tencentyun.com、hub-mirror.c.163.com、docker.1panel.live、registry.docker-cn.com（均 000） |
-| 端口现状 | 仅 22 监听，**8000 空闲**；ufw inactive、iptables INPUT ACCEPT（需在阿里云控制台放行 8000） |
+| 端口现状 | 仅 22 监听，**8000 空闲**；ufw inactive、iptables INPUT ACCEPT（**仍需在阿里云控制台放行 8000**） |
+| `/data` | **尚不存在**——compose 用命名卷 `agri-data`，无需手工创建 |
 
-> 一句话总结：**apt 装 Docker → 配 daocloud 加速器 → scp 传 3 个文件 → `docker compose pull && up -d`**。
-> 全程不需要 `get.docker.com`、不需要 `git clone`、不需要在服务器上构建。
+> 一句话总结：**Docker 已装好（29.7.2 / compose v5.5.0 / 代理已配）→ scp 传 3 个文件 → `docker compose pull && up -d`**。
+> 全程不需要装 Docker、不需要配加速器、不需要 `git clone`、不需要在服务器上构建。
 
 ### 6.1 买服务器
 
@@ -268,73 +272,81 @@ ssh root@<你的公网IP>
 
 首次连接会问 `Are you sure you want to continue connecting?`，输 `yes`，然后输密码。
 
-### 6.4 安装 Docker 与 Compose
+### 6.4 确认 Docker 环境（本机已装好，通常无需操作）
 
-> ⚠️ **不要用官方脚本 `curl -fsSL https://get.docker.com | sudo sh`**。
-> 实测这台服务器 **`download.docker.com` 不通（HTTP 000）**，官方脚本必然失败。
-> Ubuntu 官方源自带 `docker.io` 与 `docker-compose-v2`，用 apt 装即可（实测候选版本
-> `docker.io 29.1.3-0ubuntu4.1`、`docker-compose-v2 2.40.3+ds1-0ubuntu1`，
-> apt 源为 `mirrors.cloud.aliyuncs.com`，可达）。
+> **这台服务器已经装好 Docker 并且正在运行**，正常情况下直接跳到
+> [6.7 用国内 ghcr 代理加速拉取镜像](#67-用国内-ghcr-代理加速拉取镜像) 即可。
+> 本节只是确认步骤，以及"万一没装"时的补救路径。
 
 ```bash
-# 1) 更新索引
-sudo apt-get update
-
-# 2) 装 Docker 引擎 + Compose v2 子命令
-sudo apt-get install -y docker.io docker-compose-v2
-
-# 3) 设置开机自启并立即启动
-sudo systemctl enable --now docker
-
-# 4) 验证（应看到两行版本号）
-docker --version
-docker compose version
+docker --version             # 期望：Docker version 29.7.2, build a7dcaa6
+docker compose version       # 期望：Docker Compose version v5.5.0
+systemctl is-active docker   # 期望：active
 ```
+
+实测本机三项输出分别是 `Docker version 29.7.2, build a7dcaa6`、
+`Docker Compose version v5.5.0`、`active`（存储驱动 overlayfs、cgroup v2）。
 
 > 注意是 **`docker compose`（v2 子命令，中间是空格）**，不是老式的 `docker-compose`（连字符）。
 > 本 README 全部使用前者。
 
-**配置镜像加速（必做，否则拉不到任何镜像）**
+**镜像加速已经配好了**——当前 `/etc/docker/daemon.json` 的内容就是：
 
-实测这台服务器 **`registry-1.docker.io` 不通（HTTP 000）**——不配加速器，
-连 `eclipse-mosquitto:2` 都拉不下来。下面这条加速地址**实测可达**
-（`https://docker.m.daocloud.io/v2/` 返回 401 = 服务正常，只是需要鉴权）：
+```json
+{"registry-mirrors":["https://<你的镜像加速地址>"]}
+```
+
+实测 `https://<你的镜像加速地址>/v2/` 返回 **200**（Docker Hub 代理）、
+`https://<你的代理域名>/v2/` 也返回 **200**（ghcr 代理）——
+这就是 `eclipse-mosquitto:2` 能从 Docker Hub 拉下来、以及 [6.7](#67-用国内-ghcr-代理加速拉取镜像)
+能用代理拉 ghcr 镜像的原因。
+
+<details>
+<summary>万一 `docker --version` 失败：用 apt 装（点击展开）</summary>
+
+> ⚠️ **不要用官方脚本 `curl -fsSL https://get.docker.com | sudo sh`**。
+> 实测这台服务器 **`download.docker.com` 不通（HTTP 000）**，官方脚本必然失败。
+> Ubuntu 官方源自带 `docker.io` 与 `docker-compose-v2`（apt 源 `mirrors.cloud.aliyuncs.com` 可达）。
 
 ```bash
-sudo mkdir -p /etc/docker
-sudo tee /etc/docker/daemon.json > /dev/null <<'EOF'
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+```
+
+**顺便建议给容器日志限容**——2C2G 的机器磁盘小，日志不限制会把盘写满。
+把 `log-driver` / `log-opts` 合并进现有的 daemon.json，再 `sudo systemctl restart docker`：
+
+```json
 {
-  "registry-mirrors": [
-    "https://docker.m.daocloud.io"
-  ],
+  "registry-mirrors": ["https://<你的镜像加速地址>"],
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" }
 }
-EOF
-
-sudo systemctl restart docker
 ```
 
 > **实测不可达、不要写进 daemon.json 的地址**（写了会拖慢拉取甚至报错）：
 > `dockerproxy.com`、`mirror.ccs.tencentyun.com`、`hub-mirror.c.163.com`、
-> `docker.1panel.live`、`registry.docker-cn.com` —— 均返回 HTTP 000。
->
-> `log-opts` 那两行是给容器日志限容量——**2C2G 的机器磁盘小，日志不限制会把盘写满**。
+> `docker.1panel.live`、`registry.docker-cn.com` —— 均返回 000。
+> 备用可用地址是 `https://docker.m.daocloud.io`（`/v2/` 返回 401 = 可达）。
 
-**检查 swap（26.04 已自带 4GB，一般无需新建）**
+</details>
+
+**检查 swap（本机已自带 4GB，无需新建）**
 
 ```bash
 swapon --show      # 有输出说明 swap 已启用
 free -h            # 看 Swap 那一行
 ```
 
-实测该机型**系统自带 4GB swap（`/swapfile` 已启用）**，总内存 1735MB / 可用约 1029MB。
+实测该机型**系统自带 4GB swap（`/swapfile` 已启用）**，MemTotal **1820073984 B**
+（约 1735MB，可用约 998MB），磁盘 40G 用 21%。
 若你的机器 `swapon --show` 为空，再按 [8.3 技巧 1](#83-2c2g-上构建的内存优化技巧) 扩容。
 
 ### 6.5 上传部署文件
 
 > ⚠️ **不要在服务器上 `git clone`**。实测这台服务器 **`github.com` 不通（HTTP 000）**，
-> `git clone` 会卡住或直接失败。（`ghcr.io` 是可达的，所以拉镜像没问题。）
+> `git clone` 会卡住或直接失败。（`ghcr.io` 直连也不可靠，所以 [6.7](#67-用国内-ghcr-代理加速拉取镜像) 用国内代理拉镜像。）
 
 部署只需要 **3 个文件**，从你本机传上去即可：
 
@@ -344,6 +356,9 @@ free -h            # 看 Swap 那一行
 | `.env.example` | 环境变量模板（上传后复制成 `.env`） |
 | `mosquitto/mosquitto.conf` | broker 配置，**少了它容器起不来** |
 | `scripts/seed_history.py` | 可选，只在要做[第 10 节一键演示](#10-一键演示流程)灌历史数据时需要 |
+
+> ⚠️ 传完文件**先按 [6.6](#66-配置-env) 生成 `.env` 再执行任何 `docker compose` 命令**——
+> `docker-compose.yml` 里有 `env_file: .env`，缺了这个文件 `docker compose up` 会直接报错退出。
 
 **方式一：scp 上传（推荐）**
 
@@ -415,10 +430,65 @@ OPENAI_MODEL=qwen-plus
 
 > ⚠️ `.env` 已在 `.gitignore` 中，**不会**被提交。也**不要**把 Key 贴到任何地方。
 
-### 6.7 启动
+### 6.7 用国内 ghcr 代理加速拉取镜像
+
+> **为什么要这一步**：本仓库的镜像托管在 `ghcr.io`（GitHub 容器仓库）。
+> 实测这台服务器 `https://ghcr.io/v2/` 返回 401，而它的**匿名 token 接口返回 403**，
+> 直连拉取不可靠；即便能拉，链路在海外也很慢。
+> 用国内代理可以**匿名（无需 docker login）**拉公共镜像——实测
+> `docker pull <你的代理域名>/linuxcontainers/alpine:latest` → **Pull complete**。
+
+`docker-compose.yml` 里的镜像名写的是
+`${IMAGE_REGISTRY:-ghcr.io/tss-small-sunshine}/agri-aiot-platform...`，
+所以**只需要把 `IMAGE_REGISTRY` 指向代理地址**，compose 文件一个字都不用改：
+
+| 走哪条路 | `IMAGE_REGISTRY` 填什么 |
+|---|---|
+| **推荐：国内 ghcr 代理**（匿名、快） | `<你的代理域名>` |
+| 直连 ghcr.io（可能超时 / 403） | `ghcr.io/tss-small-sunshine` |
+
+**完整可复制序列**（在服务器 `~/agri-aiot-platform` 目录下执行）：
 
 ```bash
+cd ~/agri-aiot-platform
+
+# 1) 指向国内 ghcr 代理（只对本会话有效；写进 .env 则永久生效）
+export IMAGE_REGISTRY=<你的代理域名>
+
+# 2) 确认 compose 解析出的镜像名（应看到代理地址 + 后端 + 模拟器 + eclipse-mosquitto）
+docker compose config | grep 'image:'
+
+# 3) 拉三个镜像：后端、模拟器、mosquitto
 docker compose pull
+
+# 4) 启动
+docker compose up -d
+```
+
+> 想让代理**永久生效**（不必每次 export），把这一行追加进 `.env` 即可：
+>
+> ```bash
+> echo 'IMAGE_REGISTRY=<你的代理域名>' >> .env
+> ```
+>
+> `.env` 在 [6.6](#66-配置-env) 里由 `.env.example` 复制而来，`docker compose`
+> 会自动读取同目录下的 `.env` 做变量插值。
+
+**如果镜像在你自己名下**，`IMAGE_REGISTRY` 写
+`<你的代理域名>/<你的用户名或组织>`。
+注意 **ghcr.io / Docker 的仓库名必须全小写**——CI 里已经用
+`${GITHUB_REPOSITORY_OWNER,,}` 强制转小写，见 `.github/workflows/build-push.yml`。
+
+> 代理地址本身也是外部服务，哪天它挂了：去掉 `export IMAGE_REGISTRY` 那行换回直连，
+> 或改用备用加速器 `docker.m.daocloud.io`（它只代理 Docker Hub，不代理 ghcr）。
+
+### 6.8 启动
+
+> 镜像在 [6.7](#67-用国内-ghcr-代理加速拉取镜像) 里已经拉过，这里只需要把容器起起来。
+> 若跳过了 6.7（没设 `IMAGE_REGISTRY`），把下面两行都执行一遍即可。
+
+```bash
+docker compose pull          # 幂等；镜像已最新时秒回
 docker compose up -d
 ```
 
@@ -435,9 +505,10 @@ docker compose up -d
 > 首次 `pull` 会下载**三个**镜像，视网速 1~3 分钟：
 > 两个来自 ghcr.io（后端约 210MB，模拟器约 60MB），
 > 一个来自 Docker Hub（`eclipse-mosquitto:2`，约 10MB）。
-> **这就是 6.4 必须配 `registry-mirrors` 的原因**——不配加速器，mosquitto 这个镜像会拉取失败（`registry-1.docker.io` 实测不通）。
+> **这就是 6.4 里 daemon.json 已经配好代理的原因**——本机 `registry-1.docker.io` 直连不通（`eclipse-mosquitto:2` 靠 daemon.json 里的 Docker Hub 代理绕行），
+> `ghcr.io` 直连也不可靠（靠 [6.7](#67-用国内-ghcr-代理加速拉取镜像) 的 ghcr 代理）。
 
-### 6.8 验证
+### 6.9 验证
 
 ```bash
 # 1) 容器都在跑（三个服务都应是 Up）
@@ -485,7 +556,7 @@ curl -s http://127.0.0.1:8000/api/devices
 http://<你的公网IP>:8000
 ```
 
-### 6.9 看日志
+### 6.10 看日志
 
 ```bash
 docker compose logs -f              # 所有服务，实时跟随
@@ -496,7 +567,7 @@ docker compose logs --tail=100 backend   # 只看最后 100 行
 
 按 `Ctrl+C` 退出日志跟随，**容器不会被停掉**。
 
-### 6.10 常用运维命令
+### 6.11 常用运维命令
 
 ```bash
 docker compose ps                   # 查看状态
@@ -516,7 +587,7 @@ docker compose pull && docker compose up -d     # 升级到最新镜像（推荐
 >   tar czf /backup/agri-backup-$(date +%F).tar.gz -C /data .
 > ```
 
-### 6.11 升级流程
+### 6.12 升级流程
 
 ```bash
 cd ~/agri-aiot-platform
@@ -937,7 +1008,7 @@ http://<服务器IP>:8000
 | 9 | 大屏时间显示差 8 小时 / 时区不对 | `python:3.12-slim` 基础镜像**不含 tzdata**，容器默认 UTC；只设 `TZ=Asia/Shanghai` 会解析失败并静默退回 UTC | 本项目 compose 已给 `backend` 与 `simulator` 挂载 `/etc/localtime:/etc/localtime:ro`，正常无需处理。若你删过这行：`docker compose exec backend date` 确认时间，把该挂载加回后 `docker compose up -d`；**不要**用 `TZ=` 环境变量（镜像里没有时区数据库，不生效） |
 | 10 | 容器一直是 `health: starting` 或 `unhealthy` | 健康检查失败：应用没起、端口不对、或 `start_period` 太短 | `docker inspect --format='{{json .State.Health}}' agri-backend | python -m json.tool` 看失败原因；手动测 `docker compose exec backend python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/api/health').status)"`；启动慢就把 `start_period` 从 20s 调到 60s |
 | 11 | 大屏一直显示「无数据」/ 曲线是平的 | 模拟器没跑，或 MQTT 主题不匹配 | `docker compose logs -f simulator` 看有没有在发布；`docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 -t 'agri/telemetry/+/+' -v -C 3` 抓 3 条消息；确认 `.env` 里 `MQTT_TOPIC=agri/telemetry/+/+` 与设备码没写错 |
-| 12 | 磁盘被写满 / `No space left on device` | 容器日志无上限 + 遥测数据堆积 | 给 Docker 日志限容（见 [6.4 节 daemon.json](#64-安装-docker-与-compose)）；`docker system prune -af` 清理无用镜像层；`docker compose down && docker compose up -d` 重建容器（数据卷保留）；调小 `TELEMETRY_RETENTION_DAYS` |
+| 12 | 磁盘被写满 / `No space left on device` | 容器日志无上限 + 遥测数据堆积 | 给 Docker 日志限容（见 [6.4 节 daemon.json](#64-确认-docker-环境本机已装好通常无需操作)）；`docker system prune -af` 清理无用镜像层；`docker compose down && docker compose up -d` 重建容器（数据卷保留）；调小 `TELEMETRY_RETENTION_DAYS` |
 
 ---
 
