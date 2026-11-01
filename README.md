@@ -227,7 +227,7 @@ agri-aiot-platform/
 | **daemon.json** | ✅ **已配好**：`{"registry-mirrors":["https://<你的镜像加速地址>"]}` |
 | ghcr 代理 | ✅ `https://<你的代理域名>/v2/` → **200**（**匿名可拉公共镜像**，实测 `docker pull .../linuxcontainers/alpine:latest` → Pull complete） |
 | Docker Hub 代理 | ✅ `https://<你的镜像加速地址>/v2/` → **200** |
-| `ghcr.io` 直连 | ⚠️ `/v2/` → 401，但其匿名 token 接口 → **403** → 直连拉取不可靠，**走上面的 ghcr 代理** |
+| `ghcr.io` 直连 | ✅ **可用**：`/v2/` 返回 401 只是 registry 的**正常未授权响应**（此时谁都没带 token），不代表拉不到公共镜像；实测 `docker pull ghcr.io/tss-small-sunshine/agri-aiot-platform:latest` → **Downloaded newer image**（digest `sha256:1602da34…dadb2d`） |
 | `registry-1.docker.io` | ❌ **不通**（靠 Docker Hub 代理绕行） |
 | `github.com` | ❌ **不通** → **不能**在服务器上 `git clone`，改用 scp 传文件 |
 | `download.docker.com` | ❌ **不通** → 不要用官方 `get.docker.com` 脚本（本机已装好，无需再装） |
@@ -236,7 +236,7 @@ agri-aiot-platform/
 | 端口现状 | 仅 22 监听，**8000 空闲**；ufw inactive、iptables INPUT ACCEPT（**仍需在阿里云控制台放行 8000**） |
 | `/data` | **尚不存在**——compose 用命名卷 `agri-data`，无需手工创建 |
 
-> 一句话总结：**Docker 已装好（29.7.2 / compose v5.5.0 / 代理已配）→ scp 传 3 个文件 → `docker compose pull && up -d`**。
+> 一句话总结：**Docker 已装好（29.7.2 / compose v5.5.0）→ scp 传 3 个必需文件（+1 个可选）→ `docker compose pull && up -d`**（镜像直连 `ghcr.io` 即可，国内代理可选）。
 > 全程不需要装 Docker、不需要配加速器、不需要 `git clone`、不需要在服务器上构建。
 
 ### 6.1 买服务器
@@ -275,7 +275,7 @@ ssh root@<你的公网IP>
 ### 6.4 确认 Docker 环境（本机已装好，通常无需操作）
 
 > **这台服务器已经装好 Docker 并且正在运行**，正常情况下直接跳到
-> [6.7 用国内 ghcr 代理加速拉取镜像](#67-用国内-ghcr-代理加速拉取镜像) 即可。
+> [6.5 上传部署文件](#65-上传部署文件) 即可。
 > 本节只是确认步骤，以及"万一没装"时的补救路径。
 
 ```bash
@@ -298,8 +298,8 @@ systemctl is-active docker   # 期望：active
 
 实测 `https://<你的镜像加速地址>/v2/` 返回 **200**（Docker Hub 代理）、
 `https://<你的代理域名>/v2/` 也返回 **200**（ghcr 代理）——
-这就是 `eclipse-mosquitto:2` 能从 Docker Hub 拉下来、以及 [6.7](#67-用国内-ghcr-代理加速拉取镜像)
-能用代理拉 ghcr 镜像的原因。
+这就是 `eclipse-mosquitto:2` 能从 Docker Hub 拉下来的原因。
+ghcr 镜像**直连即可**，[6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速) 的国内代理只是可选的加速手段。
 
 <details>
 <summary>万一 `docker --version` 失败：用 apt 装（点击展开）</summary>
@@ -346,9 +346,9 @@ free -h            # 看 Swap 那一行
 ### 6.5 上传部署文件
 
 > ⚠️ **不要在服务器上 `git clone`**。实测这台服务器 **`github.com` 不通（HTTP 000）**，
-> `git clone` 会卡住或直接失败。（`ghcr.io` 直连也不可靠，所以 [6.7](#67-用国内-ghcr-代理加速拉取镜像) 用国内代理拉镜像。）
+> `git clone` 会卡住或直接失败。拉镜像不受影响——实测 `ghcr.io` **直连可用**，详见 [6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速)。
 
-部署只需要 **3 个文件**，从你本机传上去即可：
+部署需要 **3 个必需文件 + 1 个可选文件**，从你本机传上去即可：
 
 | 文件 | 作用 |
 |---|---|
@@ -365,22 +365,22 @@ free -h            # 看 Swap 那一行
 在你**本机**的终端里执行（注意路径按你本地实际仓库位置改）：
 
 ```bash
-# 在服务器上先建目录
-ssh root@<你的公网IP> "mkdir -p ~/agri-aiot-platform/mosquitto"
+# 在服务器上先建目录（scripts/ 也要一起建，否则下一步传 seed_history.py 会失败）
+ssh root@<你的公网IP> "mkdir -p ~/agri-aiot-platform/mosquitto ~/agri-aiot-platform/scripts"
 
-# 从本机把三个文件传上去
+# 3 个必需文件
 scp docker-compose.yml           root@<你的公网IP>:~/agri-aiot-platform/
 scp .env.example                 root@<你的公网IP>:~/agri-aiot-platform/
 scp mosquitto/mosquitto.conf     root@<你的公网IP>:~/agri-aiot-platform/mosquitto/
 
-# 可选：演示要灌历史数据时才需要
+# 可选（第 4 个文件）：演示要灌历史数据时才需要
 scp scripts/seed_history.py      root@<你的公网IP>:~/agri-aiot-platform/scripts/
 ```
 
 **方式二：在服务器上用 nano 粘贴**
 
 ```bash
-mkdir -p ~/agri-aiot-platform/mosquitto
+mkdir -p ~/agri-aiot-platform/mosquitto ~/agri-aiot-platform/scripts
 cd ~/agri-aiot-platform
 
 nano docker-compose.yml
@@ -430,61 +430,79 @@ OPENAI_MODEL=qwen-plus
 
 > ⚠️ `.env` 已在 `.gitignore` 中，**不会**被提交。也**不要**把 Key 贴到任何地方。
 
-### 6.7 用国内 ghcr 代理加速拉取镜像
+### 6.7 拉取镜像（直连 ghcr.io 可用，国内代理可选加速）
 
-> **为什么要这一步**：本仓库的镜像托管在 `ghcr.io`（GitHub 容器仓库）。
-> 实测这台服务器 `https://ghcr.io/v2/` 返回 401，而它的**匿名 token 接口返回 403**，
-> 直连拉取不可靠；即便能拉，链路在海外也很慢。
-> 用国内代理可以**匿名（无需 docker login）**拉公共镜像——实测
-> `docker pull <你的代理域名>/linuxcontainers/alpine:latest` → **Pull complete**。
+> **先说结论：直连 `ghcr.io` 就能拉。** 实测在这台服务器上
+> `docker pull ghcr.io/tss-small-sunshine/agri-aiot-platform:latest` → **Downloaded newer image**，
+> digest `sha256:1602da34457b4c8397687843e6286a9d2d1a9097500b0a876bea497679dadb2d`；
+> 随后 `docker compose pull && docker compose up -d` 三个镜像全部拉取成功、三个容器全部 `Started`。
+>
+> **别被 `/v2/` 的 401 吓到**：`https://ghcr.io/v2/` 返回 401 是 registry 的**正常未授权响应**
+> （此时谁都没带 token），不代表拉不到公共镜像；它的匿名 token 接口实测返回 200。
+> 国内代理只是**可选的加速手段**，不是必做步骤。
 
 `docker-compose.yml` 里的镜像名写的是
 `${IMAGE_REGISTRY:-ghcr.io/tss-small-sunshine}/agri-aiot-platform...`，
-所以**只需要把 `IMAGE_REGISTRY` 指向代理地址**，compose 文件一个字都不用改：
+默认值**已经包含 owner 那一层**，所以什么都不设就是直连：
 
 | 走哪条路 | `IMAGE_REGISTRY` 填什么 |
 |---|---|
-| **推荐：国内 ghcr 代理**（匿名、快） | `<你的代理域名>` |
-| 直连 ghcr.io（可能超时 / 403） | `ghcr.io/tss-small-sunshine` |
+| **直连 ghcr.io（默认，实测可用）** | 不用设（等价于 `ghcr.io/tss-small-sunshine`） |
+| 国内 ghcr 代理（可选，链路在国内更快） | `<你的代理域名>/tss-small-sunshine` |
+
+> ⚠️ **代理值必须带 `/tss-small-sunshine` 这一层。** 只写裸代理域名
+> `<你的代理域名>` 会变成拉 `代理域名/agri-aiot-platform`，
+> 丢掉 owner 那一段，实测直接失败：
+> `Error response from daemon: no matching manifest for linux/amd64/v4 in the manifest list entries: ... not found`。
 
 **完整可复制序列**（在服务器 `~/agri-aiot-platform` 目录下执行）：
 
 ```bash
 cd ~/agri-aiot-platform
 
-# 1) 指向国内 ghcr 代理（只对本会话有效；写进 .env 则永久生效）
-export IMAGE_REGISTRY=<你的代理域名>
-
-# 2) 确认 compose 解析出的镜像名（应看到代理地址 + 后端 + 模拟器 + eclipse-mosquitto）
+# 1) 确认 compose 解析出的镜像名（默认应看到三条 ghcr.io/tss-small-sunshine/...）
 docker compose config | grep 'image:'
 
-# 3) 拉三个镜像：后端、模拟器、mosquitto
+# 2) 拉三个镜像：后端、模拟器、mosquitto
 docker compose pull
 
-# 4) 启动
+# 3) 启动
 docker compose up -d
 ```
 
-> 想让代理**永久生效**（不必每次 export），把这一行追加进 `.env` 即可：
+想改用国内代理加速时，`export` 之后再执行同样的两步：
+
+```bash
+export IMAGE_REGISTRY=<你的代理域名>/tss-small-sunshine
+docker compose config | grep 'image:'    # 确认是 代理域名/tss-small-sunshine/agri-aiot-platform
+docker compose pull
+```
+
+> 想让代理**永久生效**（不必每次 export），把这一行追加进 `.env` 即可
+> ——注意**不要漏掉 `/tss-small-sunshine`**：
 >
 > ```bash
-> echo 'IMAGE_REGISTRY=<你的代理域名>' >> .env
+> echo 'IMAGE_REGISTRY=<你的代理域名>/tss-small-sunshine' >> .env
 > ```
 >
 > `.env` 在 [6.6](#66-配置-env) 里由 `.env.example` 复制而来，`docker compose`
 > 会自动读取同目录下的 `.env` 做变量插值。
 
-**如果镜像在你自己名下**，`IMAGE_REGISTRY` 写
-`<你的代理域名>/<你的用户名或组织>`。
+> 注意 `IMAGE_REGISTRY` 只影响 **compose 的变量插值**（决定镜像地址），
+> **不会**注入 backend / simulator 容器的进程环境——容器内的环境变量由 `env_file: .env` 提供。
+
+**换成你自己的镜像仓库**：把 `IMAGE_REGISTRY` 整体替换成 `<registry>/<owner>` **两段**
+（例如 `ghcr.io/<你的用户名或组织>`、
+`<你的代理域名>/<你的用户名或组织>`）——**owner 这一段不能省**。
 注意 **ghcr.io / Docker 的仓库名必须全小写**——CI 里已经用
 `${GITHUB_REPOSITORY_OWNER,,}` 强制转小写，见 `.github/workflows/build-push.yml`。
 
-> 代理地址本身也是外部服务，哪天它挂了：去掉 `export IMAGE_REGISTRY` 那行换回直连，
+> 代理地址本身也是外部服务，哪天它挂了：去掉 `export IMAGE_REGISTRY` 那行即回到**直连**（实测可用），
 > 或改用备用加速器 `docker.m.daocloud.io`（它只代理 Docker Hub，不代理 ghcr）。
 
 ### 6.8 启动
 
-> 镜像在 [6.7](#67-用国内-ghcr-代理加速拉取镜像) 里已经拉过，这里只需要把容器起起来。
+> 镜像在 [6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速) 里已经拉过，这里只需要把容器起起来。
 > 若跳过了 6.7（没设 `IMAGE_REGISTRY`），把下面两行都执行一遍即可。
 
 ```bash
@@ -503,10 +521,10 @@ docker compose up -d
 ```
 
 > 首次 `pull` 会下载**三个**镜像，视网速 1~3 分钟：
-> 两个来自 ghcr.io（后端约 210MB，模拟器约 60MB），
+> 两个来自 ghcr.io（后端约 210MB，模拟器约 60MB），实测**直连即可拉取**；
 > 一个来自 Docker Hub（`eclipse-mosquitto:2`，约 10MB）。
-> **这就是 6.4 里 daemon.json 已经配好代理的原因**——本机 `registry-1.docker.io` 直连不通（`eclipse-mosquitto:2` 靠 daemon.json 里的 Docker Hub 代理绕行），
-> `ghcr.io` 直连也不可靠（靠 [6.7](#67-用国内-ghcr-代理加速拉取镜像) 的 ghcr 代理）。
+> **这就是 6.4 里 daemon.json 已经配好代理的原因**——本机 `registry-1.docker.io` 直连不通（`eclipse-mosquitto:2` 靠 daemon.json 里的 Docker Hub 代理绕行）。
+> ghcr.io 不需要代理；链路慢时可按 [6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速) 选国内代理加速。
 
 ### 6.9 验证
 
@@ -1009,6 +1027,7 @@ http://<服务器IP>:8000
 | 10 | 容器一直是 `health: starting` 或 `unhealthy` | 健康检查失败：应用没起、端口不对、或 `start_period` 太短 | `docker inspect --format='{{json .State.Health}}' agri-backend | python -m json.tool` 看失败原因；手动测 `docker compose exec backend python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/api/health').status)"`；启动慢就把 `start_period` 从 20s 调到 60s |
 | 11 | 大屏一直显示「无数据」/ 曲线是平的 | 模拟器没跑，或 MQTT 主题不匹配 | `docker compose logs -f simulator` 看有没有在发布；`docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 -t 'agri/telemetry/+/+' -v -C 3` 抓 3 条消息；确认 `.env` 里 `MQTT_TOPIC=agri/telemetry/+/+` 与设备码没写错 |
 | 12 | 磁盘被写满 / `No space left on device` | 容器日志无上限 + 遥测数据堆积 | 给 Docker 日志限容（见 [6.4 节 daemon.json](#64-确认-docker-环境本机已装好通常无需操作)）；`docker system prune -af` 清理无用镜像层；`docker compose down && docker compose up -d` 重建容器（数据卷保留）；调小 `TELEMETRY_RETENTION_DAYS` |
+| 13 | `docker compose up -d` 报 `not a directory: Are you trying to mount a directory onto a file (or vice-versa)?` | 上传文件前 `./mosquitto/` 目录不存在，Docker 会把 bind 源 `./mosquitto/mosquitto.conf` **自动创建成一个目录**；此后往这个路径传文件必然失败 | `cd ~/agri-aiot-platform && rm -rf mosquitto && mkdir -p mosquitto`，重新 `scp mosquitto/mosquitto.conf root@<你的公网IP>:~/agri-aiot-platform/mosquitto/`，再 `docker compose up -d`（[6.5](#65-上传部署文件) 的 `mkdir -p` 就是为了避开这个坑） |
 
 ---
 

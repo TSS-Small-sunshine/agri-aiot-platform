@@ -44,9 +44,10 @@
 - `.env` 与数据库文件一律不入库；`.env.example` 提供全部 21 个环境变量的中文说明与可用默认值。
 - 所有可调参数走环境变量，代码零硬编码。
 - mosquitto 1883 仅在容器内网可达，不映射到宿主机，公网无暴露面。
-- **按目标服务器实测事实修正部署路径**：该机 `download.docker.com` / `registry-1.docker.io` / `github.com` 均不可达；Docker 已装好（29.7.2 / compose v5.5.0），`/etc/docker/daemon.json` 已配 `https://<你的镜像加速地址>` 代理；部署改为 scp 传文件而非 `git clone`，并新增用国内 ghcr 代理（`<你的代理域名>`）匿名拉镜像。
+- **按目标服务器实测事实修正部署路径**：该机 `download.docker.com` / `registry-1.docker.io` / `github.com` 均不可达；Docker 已装好（29.7.2 / compose v5.5.0），`/etc/docker/daemon.json` 已配 `https://<你的镜像加速地址>` 代理；部署改为 scp 传文件而非 `git clone`；镜像**直连 `ghcr.io` 即可**，国内代理（`<你的代理域名>/tss-small-sunshine`）仅作可选加速。
 - **新增 `.dockerignore`**：两个 Dockerfile 的构建上下文都是仓库根目录，排除 `.venv`（35.3MB）、`frontend/node_modules`（100.6MB）、`dist`、`data`、`logs`、`.git`、`.github`、`*.db` 系列、`__pycache__`、`.env` 等无关内容，只保留构建真正依赖的路径。
 - **时区修正**：`python:3.12-slim` 基础镜像不含 tzdata，容器默认 UTC 会让大屏时间差 8 小时；compose 给 `backend` 与 `simulator` 挂载 `/etc/localtime:/etc/localtime:ro` 解决。
+- **按服务器端到端部署实测再修正 3 处**：① `IMAGE_REGISTRY` **必须带 owner 那一段**（`<代理域名>/tss-small-sunshine`），只写裸代理域名会丢掉 owner，实测报 `no matching manifest for linux/amd64/v4 in the manifest list entries`；② 实测 `ghcr.io` **直连可用**（`/v2/` 的 401 是正常未授权响应），国内代理从「必做」降为「可选加速」；③ 6.5 文件清单统一为「3 个必需 + 1 个可选」，scp 前补 `mkdir -p ~/agri-aiot-platform/scripts`，并把「`./mosquitto/` 不存在时 Docker 把 bind 源自动建成目录」的坑写进排错表（12 → 13 条）。
 
 ---
 
