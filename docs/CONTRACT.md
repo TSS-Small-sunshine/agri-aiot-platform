@@ -1,4 +1,4 @@
-# 接口契约（冻结版 v1）—— 三路开发必须严格遵守
+# 接口契约（冻结版 v1，V2.0 增量见 §9）—— 三路开发必须严格遵守
 
 > 本文件是并行开发的唯一接口真相。任何一方不得单方面修改；如需变更，先改本文件。
 
@@ -149,7 +149,7 @@ items 按 created_at 降序。
 **GET /api/ai/history** query: `limit`(默认 20，上限 AI_HISTORY_LIMIT)
 → `{"total":37,"items":[{"id":7,"question":"...","answer":"...","model":"...","degraded":0,"latency_ms":1200,"created_at":"..."}]}` 降序。
 
-**GET /api/meta** → `{"plots":[{"plot_code":"A","plot_name":"A区·柑橘示范园","devices":["FJ-CITRUS-A01","FJ-CITRUS-A02"]}],"thresholds":{"temperature":{"min":15,"max":35,"critical_min":5,"critical_max":38},"humidity":{"min":40,"max":85},"soil_moisture":{"min":35,"max":80,"critical_min":25}},"sim_interval_seconds":5}`
+**GET /api/meta** → `{"plots":[{"plot_code":"A","plot_name":"A区·柑橘示范园","devices":["FJ-CITRUS-A01","FJ-CITRUS-A02"]}],"thresholds":{"temperature":{"min":15,"max":35,"critical_min":5,"critical_max":38},"humidity":{"min":40,"max":85,"critical_min":30,"critical_max":95},"soil_moisture":{"min":35,"max":80,"critical_min":25}},"sim_interval_seconds":5}`
 
 ## 6. 告警阈值（config.py 常量，同时经 /api/meta 暴露给前端）
 - temperature：正常 15~35℃；>38 或 <5 → critical；35~38 或 5~15 → warning
@@ -193,3 +193,17 @@ AC8 要求 V1 接口逐字段不变，但 `/api/meta` 被 V2_PLAN §6 明确列�
 
 ### 9.5 偏差校正同时改 `power_kwh`（裁定：接受）
 大模型给出的 `yield_loss_pct` 与农学先验偏差 > `REASONING_PRIOR_TOLERANCE_PCT`(15) 时，后端**同时**把 `power_kwh` 也换成先验值，避免同一棵树里两个数字出自不同模型而自相矛盾。响应体 `corrected=true` 且白盒第 3 步写明校正原因。
+
+### 9.6 V2.0 新增接口 / 表 / MQTT 主题的权威来源
+
+本文件 §2–§8 冻结的是 **V1 的 11 个接口与 4 张表**，V2.0 的全部增量（12 条新接口的逐字段响应体、4 张新表 DDL、3 条新 MQTT 主题）**不再复制到本文件**，避免同一事实两处维护而漂移。权威来源如下：
+
+| 内容 | 权威文件 |
+|---|---|
+| 12 条 V2 新接口的逐字段响应体与示例 | `docs/API.md` |
+| 4 张新表（`reasoning` / `commands` / `weather` / `skus`）DDL 与索引 | `docs/ARCHITECTURE.md` 第二章 |
+| MQTT 新主题 `agri/weather/{plot_code}`、`agri/command/{plot}/{device}`、`agri/command_ack/{plot}/{device}` | `docs/ARCHITECTURE.md` 第四章 |
+| 推演树 JSON 冻结结构、Prompt 全文、三段式降级 | `docs/V2_PLAN.md` §7 / §8 |
+| V1 的 11 个接口 | **本文件 §5（仍严格冻结，V2 只增不改）** |
+
+> 唯一例外是 §9.4 已裁定的 `/api/meta`：该接口按**超集**验收。
