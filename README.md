@@ -238,14 +238,14 @@ agri-aiot-platform/
 | 系统 | Ubuntu **26.04 LTS** (resolute)，x86_64，2 核（22.04 / 24.04 同样适用） |
 | 内存 / 磁盘 | MemTotal **1820073984 B**（约 1735MB，可用约 998MB）；**已自带 4GB swap**（`/swapfile` 已启用）；磁盘 40G 用 21% |
 | **Docker** | ✅ **已安装且已运行**：`Docker version 29.7.2, build a7dcaa6`、`Docker Compose version v5.5.0`、`systemctl is-active docker` → **active**；驱动 overlayfs、cgroup v2 |
-| **daemon.json** | ✅ **已配好**：`{"registry-mirrors":["https://<你的镜像加速地址>"]}` |
-| ghcr 代理 | ✅ `https://<你的代理域名>/v2/` → **200**（**匿名可拉公共镜像**，实测 `docker pull .../linuxcontainers/alpine:latest` → Pull complete） |
-| Docker Hub 代理 | ✅ `https://<你的镜像加速地址>/v2/` → **200** |
+| **daemon.json** | ✅ **已配好** registry mirror（具体地址随机器而异，用 `cat /etc/docker/daemon.json` 查看当前值） |
+| ghcr 镜像代理 | 可选：若你的机器配了 ghcr 代理，`IMAGE_REGISTRY` 填 `<你的代理域名>/<owner>`（**两段**）；不填则直连 `ghcr.io`（见 [6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速)） |
+| Docker Hub 代理 | 该机 `registry-1.docker.io` 不通，靠 `daemon.json` 里的 registry mirror 绕行（具体地址随机器而异） |
 | `ghcr.io` 直连 | ✅ **可用**：`/v2/` 返回 401 只是 registry 的**正常未授权响应**（此时谁都没带 token），不代表拉不到公共镜像；实测 `docker pull ghcr.io/tss-small-sunshine/agri-aiot-platform:latest` → **Downloaded newer image**（digest `sha256:1602da34…dadb2d`） |
 | `registry-1.docker.io` | ❌ **不通**（靠 Docker Hub 代理绕行） |
 | `github.com` | ❌ **不通** → **不能**在服务器上 `git clone`，改用 scp 传文件 |
 | `download.docker.com` | ❌ **不通** → 不要用官方 `get.docker.com` 脚本（本机已装好，无需再装） |
-| 备用加速器 | ✅ `https://docker.m.daocloud.io`（`/v2/` 返回 401 = 可达），仅当上面的代理失效时改用 |
+| 备用加速器（第三方公开服务） | `https://docker.m.daocloud.io`（实测 `/v2/` 返回 401 = 可达）；**第三方公开加速器，可用性会变**，仅当自己的代理失效时试用 |
 | 不可用加速器 | ❌ dockerproxy.com、mirror.ccs.tencentyun.com、hub-mirror.c.163.com、docker.1panel.live、registry.docker-cn.com（均 000） |
 | 端口现状 | 仅 22 监听，**8000 空闲**；ufw inactive、iptables INPUT ACCEPT（**仍需在阿里云控制台放行 8000**） |
 | `/data` | **尚不存在**——compose 用命名卷 `agri-data`，无需手工创建 |
@@ -304,16 +304,20 @@ systemctl is-active docker   # 期望：active
 > 注意是 **`docker compose`（v2 子命令，中间是空格）**，不是老式的 `docker-compose`（连字符）。
 > 本 README 全部使用前者。
 
-**镜像加速已经配好了**——当前 `/etc/docker/daemon.json` 的内容就是：
+**先看本机镜像加速的现状**——加速地址随机器而异，不要照抄别人的：
 
-```json
-{"registry-mirrors":["https://<你的镜像加速地址>"]}
+```bash
+cat /etc/docker/daemon.json
 ```
 
-实测 `https://<你的镜像加速地址>/v2/` 返回 **200**（Docker Hub 代理）、
-`https://<你的代理域名>/v2/` 也返回 **200**（ghcr 代理）——
-这就是 `eclipse-mosquitto:2` 能从 Docker Hub 拉下来的原因。
-ghcr 镜像**直连即可**，[6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速) 的国内代理只是可选的加速手段。
+若里面已有 `registry-mirrors`（形如下面的占位符），说明 Docker Hub 走的是该 mirror——
+这就是 `eclipse-mosquitto:2` 能从 Docker Hub 拉下来的原因：
+
+```json
+{"registry-mirrors":["<你的镜像加速地址>"]}
+```
+
+ghcr 镜像**直连即可**，[6.7](#67-拉取镜像直连-ghcrio-可用国内代理可选加速) 里的代理只是可选的加速手段。
 
 <details>
 <summary>万一 `docker --version` 失败：用 apt 装（点击展开）</summary>
@@ -333,7 +337,7 @@ sudo systemctl enable --now docker
 
 ```json
 {
-  "registry-mirrors": ["https://<你的镜像加速地址>"],
+  "registry-mirrors": ["<你的镜像加速地址>"],
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" }
 }
@@ -342,7 +346,7 @@ sudo systemctl enable --now docker
 > **实测不可达、不要写进 daemon.json 的地址**（写了会拖慢拉取甚至报错）：
 > `dockerproxy.com`、`mirror.ccs.tencentyun.com`、`hub-mirror.c.163.com`、
 > `docker.1panel.live`、`registry.docker-cn.com` —— 均返回 000。
-> 备用可用地址是 `https://docker.m.daocloud.io`（`/v2/` 返回 401 = 可达）。
+> 备用可用地址是 `https://docker.m.daocloud.io`（第三方公开加速器，`/v2/` 返回 401 = 可达，可用性会变）。
 
 </details>
 
@@ -462,11 +466,10 @@ OPENAI_MODEL=qwen-plus
 | 走哪条路 | `IMAGE_REGISTRY` 填什么 |
 |---|---|
 | **直连 ghcr.io（默认，实测可用）** | 不用设（等价于 `ghcr.io/tss-small-sunshine`） |
-| 国内 ghcr 代理（可选，链路在国内更快） | `<你的代理域名>/tss-small-sunshine` |
+| 国内 ghcr 代理（可选，链路在国内更快） | `<你的代理域名>/tss-small-sunshine`（**必须两段**，见下方警告） |
 
-> ⚠️ **代理值必须带 `/tss-small-sunshine` 这一层。** 只写裸代理域名
-> `<你的代理域名>` 会变成拉 `代理域名/agri-aiot-platform`，
-> 丢掉 owner 那一段，实测直接失败：
+> ⚠️ **代理值必须写成 `<你的代理域名>/<owner>` 两段。** 只写裸代理域名
+> 会变成拉 `代理域名/agri-aiot-platform`，丢掉 owner 那一段，实测直接失败：
 > `Error response from daemon: no matching manifest for linux/amd64/v4 in the manifest list entries: ... not found`。
 
 **完整可复制序列**（在服务器 `~/agri-aiot-platform` 目录下执行）：
@@ -512,7 +515,7 @@ docker compose pull
 `${GITHUB_REPOSITORY_OWNER,,}` 强制转小写，见 `.github/workflows/build-push.yml`。
 
 > 代理地址本身也是外部服务，哪天它挂了：去掉 `export IMAGE_REGISTRY` 那行即回到**直连**（实测可用），
-> 或改用备用加速器 `docker.m.daocloud.io`（它只代理 Docker Hub，不代理 ghcr）。
+> 或改用备用加速器 `docker.m.daocloud.io`（第三方公开服务，只代理 Docker Hub、不代理 ghcr，可用性会变）。
 
 ### 6.8 启动
 
