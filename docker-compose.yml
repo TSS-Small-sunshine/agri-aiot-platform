@@ -52,6 +52,8 @@ services:
       - "8000:8000"
     volumes:
       - agri-data:/data
+      # RUNTIME_CONFIG_PATH 默认 /data/runtime_config.json，落在该具名卷上，
+      # 故 WebUI 里填的 base_url / api_key / model 升级容器后仍在。
       # 时区：python:3.12-slim 基础镜像**不含 tzdata**，只设 TZ=Asia/Shanghai 会解析失败
       # 并静默退回 UTC（大屏时间差 8 小时）。直接挂宿主机的 /etc/localtime 最稳，
       # 无需改镜像、无需装包；Ubuntu 宿主机必定存在该文件。
@@ -82,6 +84,10 @@ services:
     environment:
       # 容器内用 compose 服务名寻址 broker（覆盖 .env 里的同名值）
       MQTT_HOST: mosquitto
+      # V2 气象上报开关。simulator/mock_sensor.py 读 SIM_WEATHER_ENABLED，
+      # 缺省即视为开启（源码里默认 "1"），此处显式写出便于一键关停；
+      # 该变量未进契约第 2 节，故 .env.example 里没有它。
+      SIM_WEATHER_ENABLED: "1"
     volumes:
       # 与 backend 保持同一时区，否则上报的 ts 与后端本地时区不一致
       - /etc/localtime:/etc/localtime:ro

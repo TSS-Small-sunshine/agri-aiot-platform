@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS skus (
 | GET | `/api/command/history?limit=20` | 指令历史与回执状态 |
 | GET | `/api/weather/latest?plot_code=A` | 最新气象 + 未来 24h 模拟预报 |
 | GET | `/api/shop/skus?keyword=抗旱` | Mock 农资 SKU 列表（按 `keywords` 模糊匹配） |
-| GET | `/api/meta` | **扩展**：`plots[]` 增加 2.5D 网格坐标 `{col,row}`、`crop`、`area_mu`、`devices[]`；新增 `crops`、`weather` 段 |
+| GET | `/api/meta` | **扩展**（超集，V1 字段逐字保留）：`plots[]` 增加 `name`、`crop`、`area_mu`、`stage` 与 2.5D 网格坐标 `{col,row}`（`devices[]` 是 V1 既有字段，非新增）；顶层新增 `crops`、`weather` 段 |
 
 所有新接口沿用 V1 的错误约定：字段校验失败 422、资源不存在 404 `{"detail":"..."}`、LLM 不可用**不报 5xx**而是降级返回。
 

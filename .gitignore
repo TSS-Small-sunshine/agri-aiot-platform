@@ -72,6 +72,11 @@ logs/
 data/
 *.log
 
+# V2：运行时配置中心落盘文件（含用户明文 API Key）。
+# 路径可由 RUNTIME_CONFIG_PATH 改到任意位置，data/ 通配未必覆盖，故再显式兜底。
+runtime_config.json
+**/runtime_config.json
+
 # ===== IDE / 编辑器 =====
 .idea/
 .vscode/
