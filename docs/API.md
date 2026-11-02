@@ -76,10 +76,13 @@ curl -s http://127.0.0.1:8000/api/health
 | `status` | string | 固定 `"ok"`（进程活着） |
 | `version` | string | 来自环境变量 `APP_VERSION` |
 | `uptime_s` | number | 进程运行秒数 |
+| `db` | object | 数据库状态对象，含 `ok` / `path` |
 | `db.ok` | bool | SQLite 是否可读写 |
 | `db.path` | string | 来自环境变量 `DB_PATH` |
+| `mqtt` | object | MQTT 状态对象，含 `connected` / `host` / `port` / `topic` |
 | `mqtt.connected` | bool | 是否已连上 broker |
 | `mqtt.host` / `mqtt.port` / `mqtt.topic` | — | 来自 `MQTT_HOST` / `MQTT_PORT` / `MQTT_TOPIC` |
+| `llm` | object | 大模型状态对象，含 `configured` / `base_url` / `degraded` |
 | `llm.configured` | bool | 是否配了 `OPENAI_API_KEY` |
 | `llm.base_url` | string \| null | 来自 `OPENAI_BASE_URL`，未配置为 `null` |
 | `llm.degraded` | bool | `true` = AI 接口会返回 Mock 答案 |
@@ -376,6 +379,9 @@ curl -s http://127.0.0.1:8000/api/ai/models
 | `degraded` | `true` = 后续 chat 会走 Mock |
 | `default_model` | 来自 `OPENAI_MODEL`；为空时取发现列表第一个，无 Key 时为 `mock-agronomist` |
 | `error` | 发现失败原因（成功时为 `null`） |
+| `items[]` | object[] | 可选模型列表，每项 `{id, label, source}` |
+| `items[].id` | string | 模型 id，可直接用于 `POST /api/ai/chat` 的 `model` |
+| `items[].label` | string | 展示名（自动发现时等于 id） |
 | `items[].source` | `remote`（来自 `GET {OPENAI_BASE_URL}/models`）或 `mock` |
 
 ---
@@ -396,7 +402,7 @@ curl -s http://127.0.0.1:8000/api/ai/models
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/ai/chat \
-  -H "Content-Type: application/json" \
+  -H 'Content-Type: application/json' \
   -d '{"question":"柑橘叶子黄了怎么办","session_id":"s1","model":"qwen-plus"}'
 ```
 
@@ -680,7 +686,9 @@ curl -s http://127.0.0.1:8000/api/config
 **请求**
 
 ```bash
-curl -s -X PUT http://127.0.0.1:8000/api/config   -H 'Content-Type: application/json'   -d '{"base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","api_key":"sk-你的Key","model":"qwen-plus"}'
+curl -s -X PUT http://127.0.0.1:8000/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","api_key":"sk-你的Key","model":"qwen-plus"}'
 ```
 
 **请求体**（三个字段全部可选）
@@ -809,7 +817,9 @@ Context Engineering 推演：组装地块上下文 → 调大模型 → 返回**
 **请求**
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/reasoning/simulate   -H 'Content-Type: application/json'   -d '{"plot_code":"A"}'
+curl -s -X POST http://127.0.0.1:8000/api/reasoning/simulate \
+  -H 'Content-Type: application/json' \
+  -d '{"plot_code":"A"}'
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
@@ -1020,7 +1030,7 @@ curl -s http://127.0.0.1:8000/api/reasoning/rs_20261102T114346_3cca
 | `power_kwh` | number | 预计耗电 kWh |
 | `whitebox` | object[] | 白盒推理链 |
 | `prior` | object \| null | 本地先验测算 |
-| `prompt` | string \| null | 实际发给大模型的**完整 prompt 原文**（System + User，实测约 2.2KB） |
+| `prompt` | string \| null | 实际发给大模型的**完整 prompt 原文**（System + User，实测约 2.2K 字符（UTF-8 约 3.0 KB，随上下文略有浮动）） |
 | `raw_response` | string \| null | 大模型原始返回文本；降级路径下为 `null` |
 
 **响应 404**
@@ -1040,7 +1050,9 @@ curl -s http://127.0.0.1:8000/api/reasoning/rs_20261102T114346_3cca
 **请求**
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/api/command/execute   -H 'Content-Type: application/json'   -d '{"reasoning_id":"rs_20261102T114346_3cca","plot_code":"A","device_code":"FJ-CITRUS-A01","node_id":"plan_1","action":"irrigation_on","params":{"duration_min":40}}'
+curl -s -X POST http://127.0.0.1:8000/api/command/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"reasoning_id":"rs_20261102T114346_3cca","plot_code":"A","device_code":"FJ-CITRUS-A01","node_id":"plan_1","action":"irrigation_on","params":{"duration_min":40}}'
 ```
 
 | 字段 | 类型 | 必填 | 说明 |

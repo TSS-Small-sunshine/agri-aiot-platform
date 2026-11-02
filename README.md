@@ -21,6 +21,7 @@
 - [10. 一键演示流程](#10-一键演示流程)
 - [11. 常见问题排错表](#11-常见问题排错表)
 - [12. 接口速查表](#12-接口速查表)
+- [13. V2.0 新增功能与操作说明](#13-v20-新增功能与操作说明)
 
 ---
 
@@ -60,7 +61,7 @@ Mock 降级兜底——**没有 API Key 也能完整演示**。
 **告警引擎**
 
 - temperature：正常 15~35℃，>38 或 <5 → critical，35~38 或 5~15 → warning
-- humidity：正常 40~85%，<30 或 >95 → warning
+- humidity：正常 40~85%，<30 或 >95 → critical，>85 或 <40 → warning
 - soil_moisture：正常 35~80%，<35 → warning，<25 → critical
 
 **大模型问答**
@@ -68,6 +69,23 @@ Mock 降级兜底——**没有 API Key 也能完整演示**。
 - OpenAI 兼容接口，自动发现可用模型
 - 20 秒硬超时 + 1 次重试 + Mock 降级（HTTP 始终 200）
 - `latency_ms` 逐条埋点落库
+
+**V2.0 决策中枢（新增）**
+
+- **配置中心**：WebUI 齿轮弹窗里填 Base URL / API Key / 模型名，**保存即热生效，无需改代码、无需重启容器**；
+  模型下拉来自 `GET /api/models` 自动发现。优先级 `runtime_config.json` > 环境变量 > 内置 Mock。
+- **2.5D 地块视图**：两个地块按 `{col,row}` 网格坐标铺开，作物 / 面积 / 物候期来自 `GET /api/meta`。
+- **因果推演树**：`POST /api/reasoning/simulate` 返回一棵「当前数据 → 风险 → 处置」三节点树，前端按树渲染。
+- **白盒溯源**：推演树可展开三步时间轴（环境数据读取 / 匹配农学规则 / 大模型结论生成），
+  并可通过 `GET /api/reasoning/{id}` 看到**完整 Prompt 原文与模型原始返回**。
+- **指令闭环**：处置节点可直接下发指令，走 MQTT（QoS 1）→ 模拟器**真实改变后续采样** → 回执落库，
+  状态机 `dispatched` / `executed` / `failed` / `timeout`。
+- **农资 SKU 挂载**：推演节点带 `sku_keywords`，自动匹配 `GET /api/shop/skus`，把决策闭环延伸到采购闭环。
+- **大字模式**：顶栏一键切换，放大字号与对比度，适合田间强光下使用。
+- **移动端 `/mobile`**：单手可操作的移动端布局。
+- **`/legacy`**：V1 大屏完整保留，老用户操作习惯不被打断。
+- **气象 Mock**：模拟器按 `WEATHER_INTERVAL_SECONDS` 上报 `agri/weather/{plot_code}`，
+  后端提供最新观测 + 未来 24h 确定性预报。
 
 **部署与运维**
 
@@ -94,6 +112,10 @@ Mock 降级兜底——**没有 API Key 也能完整演示**。
 **依赖极简原则**：前端只用 `vue` / `echarts` / `vite` / `@vitejs/plugin-vue`，
 后端只用 `fastapi` / `uvicorn` / `paho-mqtt` / `httpx`（`.env` 由 Docker Compose 的 `env_file` 注入，不依赖 `python-dotenv`）。
 不引入 UI 框架、状态库、ORM。**每少一个依赖，构建峰值内存就低一截。**
+
+**V2.0 新增能力同样不引新依赖**：路由是 30 行手写的 `frontend/src/router.js`
+（`history.pushState` + `popstate`，未命中回落 `/`），弹层与 Toast 自己写，
+推演与配置中心全在后端用标准库 + 已有依赖实现。
 
 ---
 
@@ -180,22 +202,36 @@ agri-aiot-platform/
 │   │   ├── alerts.py             # 阈值规则引擎（契约第 6 节 + 告警冷却去重）
 │   │   ├── mqtt_client.py        # MQTT 订阅、消息落库，并触发告警评估
 │   │   ├── llm.py                # 大模型调用：超时 / 重试 / Mock 降级 / latency 埋点
+│   │   ├── runtime_config.py     # 【V2】运行时配置中心：读写 runtime_config.json、Key 掩码、探活
+│   │   ├── knowledge.py          # 【V2】农学先验规则引擎（不依赖大模型，纯函数）
+│   │   ├── reasoning.py          # 【V2】Context Engineering 推演 + 三段式降级 + 交叉校验
+│   │   ├── command.py            # 【V2】指令状态机：dispatched / executed / failed / timeout
+│   │   ├── weather.py            # 【V2】气象观测读取 + 未来 24h 确定性预报
 │   │   ├── routers/              # 各业务路由：__init__.py / ai.py / alerts.py
                                   # devices.py / meta.py / telemetry.py
+                                  # 【V2】config.py / reasoning.py / command.py / weather.py / shop.py
 │   │   └── static/               # 前端构建产物落点（gitignore，由脚本或镜像填入）
 │   ├── requirements.txt          # fastapi / uvicorn / paho-mqtt / httpx / pydantic
 │   └── Dockerfile                # 多阶段：node 构建前端 → python 运行
 ├── frontend/                     # 【前端】Vue3 + Vite
 │   ├── src/
 │   │   ├── main.js               # 入口：挂载 App、引入全局主题样式
-│   │   ├── App.vue               # 根组件：5s 轮询 + 顶部错误条 + 整体布局
+│   │   ├── App.vue               # 根组件：按路由分发（/ → MainView、/legacy → LegacyView、其余 → MobileView）
+│   │   ├── router.js             # 【V2】手写极简路由（3 条路由，未命中回落 /）
+│   │   ├── sourceLabel.js        # 【V2】三段式降级角标：主模型生成 / 主模型生成·已校正 / 离线降级策略
+│   │   ├── toast.js              # 【V2】轻量 Toast 总线
 │   │   ├── api.js                # 接口封装：统一超时 + ApiError（保留状态码与 detail）
 │   │   ├── config.js             # 前端可调参数（VITE_*，带安全默认值）
 │   │   ├── echarts.js            # ECharts 按需引入，只注册用到的图表与组件
 │   │   ├── styles/
 │   │   │   └── theme.css         # 深色科技感主题：颜色/间距全部走 CSS 变量
+│   │   ├── views/                # 【V2】MainView.vue（V2 主大屏）/ MobileView.vue
+│   │   │                         # LegacyView.vue + V1Screen.vue（V1 大屏原样保留）
 │   │   └── components/           # RealtimeChart.vue / DeviceStatusCard.vue
                                   # SoilGauge.vue / AlertPanel.vue / PlotMap.vue / AiChat.vue
+                                  # 【V2】PlotGrid25D.vue / ReasoningTree.vue / ReasoningWhitebox.vue
+                                  # 【V2】SettingsModal.vue / SkuCard.vue / CommandButton.vue
+                                  # 【V2】ToastHost.vue / AccessiblePanel.vue / MobileShell.vue
 │   ├── index.html                # Vite 入口 HTML
 │   ├── vite.config.js            # build.outDir = dist；dev 代理 /api → 127.0.0.1:8000
 │   ├── package.json
@@ -213,17 +249,21 @@ agri-aiot-platform/
 ├── docs/
 │   ├── CONTRACT.md               # 接口契约（冻结版，唯一真相）
 │   ├── ARCHITECTURE.md           # 目录结构 + 数据库设计（表/索引/阈值/MQTT/接口清单）
-│   └── API.md                    # 接口文档（方法/参数/示例请求/示例响应）
+│   ├── V2_PLAN.md                # V2.0 实施方案（新增表 / 接口 / 推演树结构 / 降级口径）
+│   ├── V2_PITCH.md               # V2.0 答辩防御话术（主问题 / 追问 / 演示脚本 / 风险兜底）
+│   └── API.md                    # 接口文档（V1 11 条 + V2 12 条，方法/参数/示例请求/示例响应）
 ├── docker-compose.yml            # 默认：拉 ghcr 预构建镜像
 ├── docker-compose.build.yml      # 可选：本地构建覆盖文件
 ├── .dockerignore                 # 构建上下文排除（.venv / node_modules / dist / data / .env …）
-├── .env.example                  # 全部 21 个环境变量 + 中文注释
+├── .env.example                  # 全部 25 个环境变量 + 中文注释（含 V2 新增 4 个）
 ├── .gitignore
 ├── README.md                     # 本文件
 └── CHANGELOG.md                  # 含「技术难点与解决思路」演讲稿素材
 ```
 
-> `backend/app/static/`、`data/`、`logs/`、`.env`、`*.db` 均已在 `.gitignore` 中，不会入库。
+> `backend/app/static/`、`data/`、`logs/`、`.env`、`*.db`、`runtime_config.json` 均已在 `.gitignore` 中，不会入库。
+> （`runtime_config.json` 含用户明文 API Key，除 `data/` 通配外还额外加了一条显式规则兜底，
+> 因为它的路径可由 `RUNTIME_CONFIG_PATH` 改到任意位置。）
 
 ---
 
@@ -1045,6 +1085,10 @@ http://<服务器IP>:8000
 | 11 | 大屏一直显示「无数据」/ 曲线是平的 | 模拟器没跑，或 MQTT 主题不匹配 | `docker compose logs -f simulator` 看有没有在发布；`docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 -t 'agri/telemetry/+/+' -v -C 3` 抓 3 条消息；确认 `.env` 里 `MQTT_TOPIC=agri/telemetry/+/+` 与设备码没写错 |
 | 12 | 磁盘被写满 / `No space left on device` | 容器日志无上限 + 遥测数据堆积 | 给 Docker 日志限容（见 [6.4 节 daemon.json](#64-确认-docker-环境本机已装好通常无需操作)）；`docker system prune -af` 清理无用镜像层；`docker compose down && docker compose up -d` 重建容器（数据卷保留）；调小 `TELEMETRY_RETENTION_DAYS` |
 | 13 | `docker compose up -d` 报 `not a directory: Are you trying to mount a directory onto a file (or vice-versa)?` | 上传文件前 `./mosquitto/` 目录不存在，Docker 会把 bind 源 `./mosquitto/mosquitto.conf` **自动创建成一个目录**；此后往这个路径传文件必然失败 | `cd ~/agri-aiot-platform && rm -rf mosquitto && mkdir -p mosquitto`，重新 `scp mosquitto/mosquitto.conf root@<你的公网IP>:~/agri-aiot-platform/mosquitto/`，再 `docker compose up -d`（[6.5](#65-上传部署文件) 的 `mkdir -p` 就是为了避开这个坑） |
+| 14 | 在齿轮弹窗里填了 Key 并保存，但推演还是【离线降级策略】 | 保存的配置没生效，或 `RUNTIME_CONFIG_PATH` 指向了不可写的路径 | `curl -s http://127.0.0.1:8000/api/config` 看 `configured` 是否为 `true`、`source` 是否为 `runtime`、`path` 指向哪里；`docker compose exec backend ls -ld $(dirname <path>)` 确认可写；容器内该路径必须落在 `agri-data` 卷（默认 `/data/runtime_config.json`） |
+| 15 | `POST /api/config/test` 一直 `ok=false` | 地址不对（少 `/v1`）、Key 无效、或容器出不了网 | 看返回的 `error`：`404` = Base URL 少 `/v1`；`401` = Key 错/过期；`ConnectError` = 地址不通。容器内连本机 Ollama 要用 `host.docker.internal` 而不是 `localhost` |
+| 16 | 指令一直停在 `dispatched`，30 秒后变 `timeout` | 模拟器没订阅到指令（broker 不通），或指令发给了模拟器未模拟的设备 | `docker compose logs -f simulator` 看有没有『已订阅下行指令』与『收到指令』；`docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 -t 'agri/command/+/+' -v -C 1` 抓一条；确认 `device_code` 在 `SIM_DEVICES` 里；必要时调大 `COMMAND_ACK_TIMEOUT_SECONDS` |
+| 17 | 推演树的节点文字被画布裁切 / 深链刷新白屏 | 分别是 ECharts graph 包围盒不含 symbolSize、以及 SPA 回退把相对路径产物解析到错误层级 | 这两个问题**本项目已修**，详见 [CHANGELOG 难点四、难点五](CHANGELOG.md)。若你改过 `frontend/src/components/ReasoningTree.vue` 或 `backend/app/main.py` 的回退逻辑，请对照那两节恢复 |
 
 ---
 
@@ -1064,7 +1108,24 @@ http://<服务器IP>:8000
 | GET | `/api/ai/models` | 可用大模型列表（含自动发现结果） |
 | POST | `/api/ai/chat` | 农技问答（超时/异常自动降级 Mock） |
 | GET | `/api/ai/history` | 问答历史 |
-| GET | `/api/meta` | 地块 / 告警阈值 / 模拟器配置 |
+| GET | `/api/meta` | 地块 / 告警阈值 / 模拟器配置（**V2 已扩展**为超集） |
+
+**V2.0 新增的 12 条**：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/config` | 当前生效的大模型配置（Key **只回显掩码**） |
+| PUT | `/api/config` | 写入配置并**热生效**（无需重启容器） |
+| POST | `/api/config/test` | 用当前配置探活并列出模型 |
+| GET | `/api/models` | 运行时模型列表（`/api/ai/models` 保留为别名） |
+| POST | `/api/reasoning/simulate` | Context Engineering 推演，返回推演树 |
+| GET | `/api/reasoning/history` | 推演历史摘要列表 |
+| GET | `/api/reasoning/{id}` | 单次推演详情（白盒：含 Prompt 原文） |
+| POST | `/api/command/execute` | 下发控制指令（MQTT + 落库） |
+| GET | `/api/command/history` | 指令历史与回执状态 |
+| GET | `/api/weather/latest` | 最新气象 + 未来 24h 预报 |
+| GET | `/api/shop/skus` | 农资 SKU 列表 |
+| GET | `/api/meta` | **扩展**：2.5D 网格坐标、作物、气象段 |
 
 **交互式文档**：服务起来后访问 `http://<host>:8000/docs`（Swagger UI，可直接试调）。
 
@@ -1085,17 +1146,212 @@ curl -s -X POST http://127.0.0.1:8000/api/ai/chat \
 
 ---
 
+## 13. V2.0 新增功能与操作说明
+
+> V2.0 的核心变化是：**系统从「看数据」升级为「给决策」**——诊断、推演、白盒溯源、下发指令、挂载物资，形成一条闭环。
+
+### 13.1 配置中心：在 WebUI 里填自己的大模型（V2 关键卖点）
+
+**不需要改服务器代码，也不需要重启容器。**
+
+1. 打开大屏 `http://<服务器IP>:8000`，点右上角**齿轮图标**；
+2. 在弹窗里填三项：
+
+   | 字段 | 填什么 | 示例 |
+   |---|---|---|
+   | Base URL | OpenAI 兼容地址，**末尾 `/v1` 别漏** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+   | API Key | 你的 Key（**表单里留空表示不改动已保存的 Key**） | `sk-xxxxxxxx` |
+   | 模型 | 从下拉里选（列表来自 `GET /api/models` 自动发现） | `qwen-plus` |
+
+3. 点保存。**立即生效**，界面上的模型名和降级角标会同步变化。
+
+**它存在哪、为什么能热生效**
+
+- 配置写在 `RUNTIME_CONFIG_PATH`（默认 `/data/runtime_config.json`，落在 `agri-data` 具名卷上，容器重建也不丢）；
+- 优先级：**`runtime_config.json` > 环境变量（`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`）> 内置 Mock**；
+- 后端**每次调用都重新读文件，进程内无缓存**，所以保存即生效；
+- 响应里永远只回显**掩码**（形如 `sk-****abcd`），完整 Key 不出现在任何响应体里。
+
+**命令行等价操作**
+
+```bash
+# 查看当前生效配置（Key 是掩码）
+curl -s http://127.0.0.1:8000/api/config
+
+# 写入配置（保存即热生效）
+curl -s -X PUT http://127.0.0.1:8000/api/config \
+  -H 'Content-Type: application/json' \
+  -d '{"base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1","api_key":"sk-你的Key","model":"qwen-plus"}'
+
+# 探活：用当前配置请求 {base_url}/models
+curl -s -X POST http://127.0.0.1:8000/api/config/test
+```
+
+> ⚠️ **`api_key` 的三种语义**（前端就是靠它避免误清 Key）：
+> 键**缺省** = 保持不变；传 `""` 空串 = 保持不变；传 `null` = **清除**。
+
+> ⚠️ **安全提醒**：`runtime_config.json` 含**明文 API Key**。它已在 `.gitignore` 里被显式忽略
+> （除 `data/` 通配外额外加了一条 `**/runtime_config.json`，因为路径可由 `RUNTIME_CONFIG_PATH` 改到任意位置）。
+> 分享截图或提交代码前请确认它没有被打包进去。
+
+### 13.2 因果推演树与白盒溯源
+
+**发起推演**
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/reasoning/simulate \
+  -H 'Content-Type: application/json' -d '{"plot_code":"A"}'
+```
+
+返回一棵三节点树：**根节点（当前数据）→ 风险节点（减产风险 X%）→ 处置节点（可执行动作）**。
+
+**看白盒**：点处置节点上的「展开推演逻辑」，会展开三步时间轴：
+
+| 步骤 | 里面有什么 |
+|---|---|
+| 环境数据读取 | **真实样本条数** + 设备编号 + 气温/湿度/墒情/土温/电量的实测值 + 气象 |
+| 匹配农学规则 | **命中**了哪条规则、**未命中**哪些规则，逐条列出 |
+| 大模型结论生成 | 产出方、与本地先验模型的偏差、是否已校正 |
+
+**看 Prompt 原文**：`GET /api/reasoning/{id}` 比列表多两个字段——
+`prompt`（实际发给大模型的完整 System + User 原文，实测约 2.2K 字符（UTF-8 约 3.0 KB，随上下文略有浮动））与 `raw_response`（模型原始返回；降级路径下为 `null`）。
+
+**三段式降级**（这是答辩最该讲的一点）：
+
+| 角标 | 触发条件 | `source` |
+|---|---|---|
+| 【主模型生成】 | 大模型返回合法 JSON 且通过 Schema 校验 | `primary` |
+| 【主模型生成·已校正】 | 模型数字与先验模型偏差 > 15 个百分点，已以后端先验为准 | `primary` + `corrected=true` |
+| 【离线降级策略】 | 无 Key / 超时 / 非 JSON / Schema 失败 | `fallback` |
+
+**三条路径返回的 JSON 结构完全一致，HTTP 永远是 200，绝不冒泡成 5xx。**
+
+### 13.3 指令闭环（真闭环，不是 Toast）
+
+在推演树的处置节点上点「执行」，或在命令行：
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/command/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"plot_code":"A","device_code":"FJ-CITRUS-A02","action":"irrigation_on","params":{"duration_min":15}}'
+```
+
+**四跳链路**：
+
+1. 后端把指令落库为 `dispatched`，返回 `command_id` / `topic` / `payload`；
+2. 向 `agri/command/{plot}/{device}` 发布 MQTT 报文，**QoS 1**；
+3. 模拟器订阅并调 `apply_command()`，**真实改变后续采样数值**——开滴灌会把墒情回升速率设为 0.85%/秒，
+   所以**几十秒后大屏上的墒情曲线真的会回升**；
+4. 模拟器向 `agri/command_ack/{plot}/{device}` 回执，后端把状态改成 `executed` 并记 `ack_at`。
+
+**状态机**：`dispatched`（已下发，等待回执）→ `executed`（已执行并回执）/ `failed`（执行失败）/
+`timeout`（超过 `COMMAND_ACK_TIMEOUT_SECONDS`（30s）未收到回执，由后台扫描任务标记）。
+
+**动作白名单**（4 个，不在白名单内直接 422）：
+`irrigation_on` / `irrigation_off` / `pesticide_dose` / `ventilation_on`。
+
+```bash
+# 查指令历史与回执状态
+curl -s 'http://127.0.0.1:8000/api/command/history?limit=20'
+```
+
+### 13.4 农资 SKU 挂载
+
+推演树的处置节点带一组 `sku_keywords`（如缺水处置带 `["滴灌带","抗旱保水剂"]`），
+前端拿这组词去查 SKU 并挂在结论下面：
+
+```bash
+curl -s 'http://127.0.0.1:8000/api/shop/skus?keyword=抗旱'
+```
+
+- 启动时**幂等 seed 6 条** SKU，不覆盖用户改动；
+- `keyword` 模糊匹配 `keywords` / `name` / `description` / `category`；
+- `image` 字段只存一个**标识符**，前端用本地占位块渲染，**不依赖任何外网图片**。
+
+### 13.5 大字模式与移动端
+
+| 入口 | 地址 | 说明 |
+|---|---|---|
+| 大字模式 | 大屏顶栏的开关 | 放大字号与对比度，田间强光下可读。**用 `v-show` 而非 `v-if` 切换**，避免 ECharts 实例失去宿主 DOM 后不再渲染 |
+| 移动端 | `http://<IP>:8000/mobile` | 单手可操作的移动端布局，适合棚里用手机看 |
+| V1 大屏 | `http://<IP>:8000/legacy` | **V1 大屏完整保留**，老用户操作习惯不被打断 |
+| V2 主大屏 | `http://<IP>:8000/` | 默认入口，KPI + 2.5D 地块 + 因果树 + AI 双轨对话 |
+
+路由是**手写的 30 行极简实现**（`frontend/src/router.js`，`history.pushState` + `popstate`），
+未命中的路径一律回落 `/`——为了 3 条路由引入 vue-router 会多约 20KB 和一个依赖，违背「禁止臃肿依赖」的硬约束。
+
+### 13.6 气象 Mock 与 2.5D 地块
+
+- 模拟器按 `WEATHER_INTERVAL_SECONDS`（默认 30s）向 `agri/weather/{plot_code}` 发布气象；
+- `GET /api/weather/latest?plot_code=A` 返回最新观测 + **未来 24 小时逐时预报**；
+  预报无第三方数据源，是**以最新观测为锚点的确定性日变化推演**（15 时最热、3 时最冷），离线也能画曲线；
+- `GET /api/meta` 已扩展为 V1 字段的**超集**：`plots[]` 增加 `name` / `crop` / `area_mu` / `stage` / `{col,row}`，
+  顶层新增 `crops[]` 与 `weather` 段。2.5D 地块视图就是按 `{col,row}` 铺开的。
+
+### 13.7 V2.0 新增的数据表与 MQTT 主题
+
+| 新增表 | 用途 |
+|---|---|
+| `reasoning` | 每次推演的结构化结论（含 `source` / `corrected` / `prompt` / `raw_response`） |
+| `commands` | 指令下发与回执状态机 |
+| `weather` | 气象观测（模拟器上报） |
+| `shop_skus` | 农资 SKU |
+
+| MQTT 主题 | 方向 | QoS | 说明 |
+|---|---|---|---|
+| `agri/weather/{plot_code}` | 上行（新增） | 0 | 气象 Mock，每 30s 一条 |
+| `agri/command/{plot_code}/{device_code}` | 下行（新增） | **1** | 后端 → 模拟器的控制指令 |
+| `agri/command_ack/{plot_code}/{device_code}` | 上行（新增） | 1 | 模拟器回执，驱动指令状态 |
+
+> 完整字段与示例响应见 **[docs/API.md](docs/API.md)**；推演树 JSON 的冻结结构见 **[docs/V2_PLAN.md](docs/V2_PLAN.md)** 第 7 节。
+
+---
+
 ## 相关文档
 
 - **[docs/CONTRACT.md](docs/CONTRACT.md)** —— 接口契约（冻结版，唯一真相）
 - **[docs/API.md](docs/API.md)** —— 接口文档（方法 / 参数 / 示例请求 / 示例响应）
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** —— 目录结构与数据库设计（4 张表 DDL、索引、阈值规则、MQTT 约定、接口清单）
-- **[CHANGELOG.md](CHANGELOG.md)** —— 更新日志 + **技术难点与解决思路（演讲稿素材）**
+- **[docs/V2_PLAN.md](docs/V2_PLAN.md)** —— V2.0 实施方案（新增表 / 接口契约 / 推演树结构 / 降级口径）
+- **[docs/V2_PITCH.md](docs/V2_PITCH.md)** —— **V2.0 答辩防御话术**（主问题四层论证 / 10 个追问应答 / 演示脚本 / 现场兜底）
+- **[CHANGELOG.md](CHANGELOG.md)** —— 更新日志 + **技术难点与解决思路（演讲稿素材，V1 三个 + V2 两个）**
 
 ## 环境变量
 
-全部 21 个环境变量的说明与默认值见 **[.env.example](.env.example)**。
+全部 **25** 个环境变量的说明与默认值见 **[.env.example](.env.example)**（与 `docs/CONTRACT.md` 第 2 节逐字一致）。
 所有可调参数一律走环境变量，代码零硬编码。
+
+| # | 变量 | 默认值 | 说明 |
+|---|---|---|---|
+| 1 | `APP_PORT` | `8000` | 后端 HTTP 监听端口；compose 映射为 `8000:8000` |
+| 2 | `APP_VERSION` | `1.0.0` | 版本号，出现在 `GET /api/health` 的 `version` |
+| 3 | `DB_PATH` | `/data/agri.db` | SQLite 数据库文件路径（容器内必须指向挂载卷 `/data`） |
+| 4 | `DATA_DIR` | `/data` | 数据目录（数据库、日志等），即 `agri-data` 卷的挂载点 |
+| 5 | `MQTT_HOST` | `mosquitto` | broker 主机名；容器内用 compose 服务名 `mosquitto`，裸机改 `127.0.0.1` |
+| 6 | `MQTT_PORT` | `1883` | broker 端口 |
+| 7 | `MQTT_TOPIC` | `agri/telemetry/+/+` | 订阅主题通配符 |
+| 8 | `DEVICE_OFFLINE_SECONDS` | `30` | `last_seen` 距今超过该值即标记 `offline` |
+| 9 | `TELEMETRY_RETENTION_DAYS` | `7` | 遥测保留天数，超期自动清理 |
+| 10 | `HISTORY_HOURS_MAX` | `168` | `GET /api/telemetry/history` 的 `hours` 上限（168h = 7 天） |
+| 11 | `CORS_ORIGINS` | `*` | 允许的跨域来源；生产同源托管，保持 `*` 即可 |
+| 12 | `OPENAI_BASE_URL` | `(空)` | OpenAI 兼容地址；留空 = 不接大模型，自动走 Mock 降级 |
+| 13 | `OPENAI_API_KEY` | `(空)` | API Key；留空同样触发 Mock 降级，不报错 |
+| 14 | `OPENAI_MODEL` | `(空)` | 默认模型名；留空则自动发现，无 Key 时为 `mock-agronomist` |
+| 15 | `OPENAI_TIMEOUT_SECONDS` | `20` | 单次大模型调用超时秒数，超时即降级，避免大屏卡死 |
+| 16 | `OPENAI_MAX_RETRIES` | `1` | 调用失败重试次数（1 = 失败后再试 1 次） |
+| 17 | `AI_HISTORY_LIMIT` | `50` | `GET /api/ai/history` 返回条数上限 |
+| 18 | `SIM_INTERVAL_SECONDS` | `5` | 模拟器遥测上报间隔（前端轮询同为 5s） |
+| 19 | `SIM_DEVICES` | `FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02` | 模拟设备清单，逗号分隔（须与契约第 3 节一致） |
+| 20 | `SIM_BAD_PROBABILITY` | `0.12` | 每次采样注入越界值的概率，用于演示告警链路；设 `0` 关闭 |
+| 21 | `ALERT_COOLDOWN_SECONDS` | `300` | 同 `device_code + metric + level` 的告警冷却秒数，防刷表 |
+| 22 | `RUNTIME_CONFIG_PATH` | `/data/runtime_config.json` | **V2** 配置中心落盘路径；优先级**高于环境变量**，改完即热生效 |
+| 23 | `REASONING_TIMEOUT_SECONDS` | `45` | **V2** 单次推演超时秒数（推演 Prompt 更长，故比 20 宽） |
+| 24 | `COMMAND_ACK_TIMEOUT_SECONDS` | `30` | **V2** 指令下发后等回执秒数，超时标记 `timeout` |
+| 25 | `WEATHER_INTERVAL_SECONDS` | `30` | **V2** 模拟器气象上报间隔，与 5s 遥测解耦 |
+
 ```bash
 cp .env.example .env    # 然后按需修改
 ```
+
+> 另外模拟器还有一个 `SIM_WEATHER_ENABLED`（默认开启），它**不在契约第 2 节的 25 个变量里**，
+> 由 `docker-compose.yml` 的 simulator 服务显式注入，用于一键关停气象上报。

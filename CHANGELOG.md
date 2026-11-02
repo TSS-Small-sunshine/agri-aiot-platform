@@ -3,6 +3,87 @@
 本文件格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0] - 2026-11-02
+
+第二个大版本：在 V1「采集 → 存储 → 大屏 → 问答」的基础上，把系统升级为**事件驱动的决策中枢**——
+诊断、推演、白盒溯源、下发指令、挂载物资，形成一条可追溯的闭环。
+
+### 新增 · 运行时配置中心（V2 关键卖点）
+
+- `GET /api/config`：返回当前**生效**配置，`api_key` **只回显掩码**（`sk-****abcd`），完整值永不返回。
+- `PUT /api/config`：写 `RUNTIME_CONFIG_PATH` 并**立即热生效**——后端每次调用都重新读文件，进程内无缓存，**无需改代码、无需重启容器**。
+- `POST /api/config/test`：用当前配置探活 `{base_url}/models`，失败也返回 200 + `ok=false` + `error`。
+- `GET /api/models`：运行时模型列表（V1 的 `GET /api/ai/models` 保留为别名，两者响应完全一致）。
+- 优先级：`runtime_config.json` > 环境变量（`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`）> 内置 Mock。
+- `api_key` 三态语义：键**缺省**=保持不变、传 `""` 空串=保持不变、传 `null`=清除——前端靠它避免误清 Key。
+- 落盘用 `.json.tmp` 再 `replace` 的**原子写**，避免写一半被读到。
+
+### 新增 · 因果推演树与白盒溯源
+
+- `POST /api/reasoning/simulate`：Context Engineering 推演，返回「当前数据 → 风险 → 处置」三节点树。
+- `GET /api/reasoning/history`：推演历史摘要列表（主键字段是 `reasoning_id`，不是 `id`）。
+- `GET /api/reasoning/{id}`：单次推演详情，**额外含 `prompt` 原文（实测约 2.2K 字符（UTF-8 约 3.0 KB，随上下文略有浮动））与 `raw_response`**，是白盒的证据来源。
+- **三段式降级**（答辩核心）：① 合法 JSON → `source=primary`；② 数字与先验偏差 > `REASONING_PRIOR_TOLERANCE_PCT`（15 个百分点）→ 以后端先验为准、`corrected=true`、白盒标注「已校正」；③ 无 Key / 超时 / 非 JSON / Schema 失败 → `backend/app/knowledge.py` 产出**同结构** JSON，`source=fallback`。
+- **铁律**：任何异常都收敛为降级结果，**绝不冒泡成 5xx**。
+- `backend/app/knowledge.py`：**完全独立于大模型**的农学先验规则引擎，不访问网络、不访问数据库，纯函数，便于单测与答辩讲解。
+
+### 新增 · 指令闭环（真闭环，非 Toast）
+
+- `POST /api/command/execute`：落库 `status=dispatched` → 向 `agri/command/{plot}/{device}` 发布 MQTT（**QoS 1**）。
+- `GET /api/command/history`：指令历史与回执状态。
+- **状态机** `dispatched` → `executed` / `failed` / `timeout`；`timeout` 由 `backend/app/main.py` 的后台扫描任务按 `COMMAND_ACK_TIMEOUT_SECONDS`（30s）标记。
+- 动作白名单 4 个：`irrigation_on` / `irrigation_off` / `pesticide_dose` / `ventilation_on`，不在白名单内直接 422。
+- 模拟器收到指令后**真实改变后续采样数值**：开滴灌把墒情回升速率设为 0.85%/秒并持续指定分钟数、施药使土温 −1.5℃ 且湿度 +4% 持续 45 分钟、通风使气温 −1.8℃ 且湿度 −6% 持续 20 分钟——所以大屏曲线**真的会动**。
+
+### 新增 · 气象 Mock 与 2.5D 地块
+
+- 模拟器按 `WEATHER_INTERVAL_SECONDS`（30s）向 `agri/weather/{plot_code}` 发布气象。
+- `GET /api/weather/latest`：最新观测 + 未来 24h 逐时预报；**永远 200**，无数据时 `latest=null`、`forecast=[]`、`source="none"`。
+- 预报无第三方数据源，是**以最新观测为锚点的确定性日变化推演**（15 时最热、3 时最冷，高湿时叠小雨），离线也能画出 24h 曲线。
+- `GET /api/meta` 扩展为 V1 字段的**超集**：`plots[]` 增加 `name` / `crop` / `area_mu` / `stage` / `{col,row}`，顶层新增 `crops[]` 与 `weather` 段。
+
+### 新增 · 农资 SKU 挂载（商业闭环）
+
+- `GET /api/shop/skus?keyword=`：启动时**幂等 seed 6 条** SKU（`INSERT OR IGNORE`，不覆盖用户改动）。
+- 模糊匹配 `keywords` / `name` / `description` / `category`；推演节点的 `sku_keywords` 直接喂给它，把决策闭环延伸到采购闭环。
+- `image` 只存一个**标识符**，前端用本地占位块渲染，**不依赖任何外网图片**（既保离线演示，也避版权问题）。
+
+### 新增 · 前端（大字模式 / 移动端 / V1 保留）
+
+- **大字模式**：顶栏一键切换，放大字号与对比度，田间强光下可读。用 `v-show` 而非 `v-if` 切换，避免 ECharts 实例失去宿主 DOM 后不再渲染。
+- **移动端 `/mobile`**：单手可操作的移动端布局。
+- **`/legacy`**：V1 大屏完整保留，老用户操作习惯不被打断。
+- **手写极简路由**：`frontend/src/router.js` 只有 3 条路由（`/` / `/legacy` / `/mobile`），基于 `history.pushState` + `popstate`，未命中一律回落 `/`。为 3 条路由引入 vue-router 会多约 20KB 和一个依赖，违背「禁止臃肿依赖」硬约束。
+- **三段式降级角标**：`frontend/src/sourceLabel.js` 是唯一判定处——【主模型生成】/【主模型生成·已校正】/【离线降级策略】。
+- 新增组件：`PlotGrid25D.vue`（2.5D 地块）、`ReasoningTree.vue`（因果树）、`ReasoningWhitebox.vue`（白盒时间轴）、`SettingsModal.vue`（配置中心弹窗）、`SkuCard.vue`、`CommandButton.vue`、`ToastHost.vue`、`AccessiblePanel.vue`、`MobileShell.vue`。
+
+### 新增 · 数据表与 MQTT 主题
+
+- 新增 4 张表（启动时幂等建表）：`reasoning`（推演结论，含 `prompt` / `raw_response`）、`commands`（指令状态机）、`weather`（气象观测）、`shop_skus`（农资 SKU）。
+- 新增 3 个 MQTT 主题：上行 `agri/weather/{plot_code}`（QoS 0）、下行 `agri/command/{plot_code}/{device_code}`（**QoS 1**）、上行 `agri/command_ack/{plot_code}/{device_code}`（QoS 1）。
+
+### 变更
+
+- **环境变量 21 → 25**：新增 `RUNTIME_CONFIG_PATH` / `REASONING_TIMEOUT_SECONDS` / `COMMAND_ACK_TIMEOUT_SECONDS` / `WEATHER_INTERVAL_SECONDS`；契约升级到 **v1.2**。
+- `GET /api/meta` 由 V1 的 3 字段扩展为 5 字段超集，**V1 字段逐字保留**，老前端不受影响。
+- 前端默认入口从 V1 大屏变为 V2 主大屏；V1 大屏移到 `/legacy`。
+- `docs/API.md` 从 11 条接口扩展到 **23 条**（V1 11 + V2 12），响应体逐字段核对过 `backend/app/schemas.py` 与 `backend/app/routers/*.py` 源码。
+- 新增文档：`docs/ARCHITECTURE.md`（目录结构 + 数据库设计）、`docs/V2_PLAN.md`（实施方案）、`docs/V2_PITCH.md`（**答辩防御话术**）。
+
+### 修复
+
+- **推演降级路径 500 → 200**：`weather` 表为空（新部署、模拟器还没上报过气象）且大模型未配置时，`POST /api/reasoning/simulate` 会抛 `AttributeError: 'NoneType' object has no attribute 'get'`。根因是 `backend/app/knowledge.py` 里写了 `context.get('weather', {})`——只在**键缺失**时回默认值，键存在且值为 `None` 时仍返回 `None`；而同文件其他位置用的是正确的 `context.get("weather") or {}`。修正后该组合返回 200 + 降级结果，符合 V2_PLAN「LLM 不可用不报 5xx」的约定。
+- **SPA 深链白屏**：详见下方「难点五」。
+- **ECharts Graph 节点被画布裁切**：详见下方「难点四」。
+- `.env.example` 从 19 个补齐到 25 个（含契约 v1.1 新增的 `SIM_BAD_PROBABILITY` / `ALERT_COOLDOWN_SECONDS`）。
+- `.gitignore` 增加 `runtime_config.json` 与 `**/runtime_config.json` 两条显式规则：该文件含用户**明文 API Key**，且路径可由 `RUNTIME_CONFIG_PATH` 改到任意位置，仅靠 `data/` 通配未必覆盖。
+
+### 安全 / 运维
+
+- 配置中心的 Key 只回显掩码，完整值不出现在任何响应体里；落盘文件已显式 gitignore。
+- 指令动作走白名单校验，非法动作 422，不落库、不发布。
+- 推演 Prompt 与模型原始返回**只在 `GET /api/reasoning/{id}` 单条详情里返回**，列表接口不带，避免历史列表响应体膨胀。
+
 ---
 
 ## [1.0.0] - 2026-01-01
@@ -53,8 +134,11 @@
 
 # 技术难点与解决思路（演讲稿可用素材）
 
-> 三个真实踩过的坑。每个都给出**现象 → 根因 → 方案（含具体配置/代码）→ 量化收益 → 一句话口径**，
+> **五个**真实踩过的坑（V1 三个 + V2 两个）。每个都给出**现象 → 根因 → 方案（含具体配置/代码）→ 量化收益 → 一句话口径**，
 > 可以直接拆进 PPT，也可以照着讲。
+
+> 难点一 / 二 / 三 属于 V1（构建 OOM、跨域与 SPA 404、大模型超时卡死），
+> 难点四 / 五 属于 V2（ECharts 节点被裁切、SPA 深链白屏）。
 
 ---
 
@@ -366,6 +450,220 @@ latency_ms = int((time.perf_counter() - t0) * 1000)
 > 20 秒硬超时、失败重试一次、异常一律降级成 Mock 答案并且 HTTP 仍然返回 200，
 > 同时把调用放到异步链路里，保证大屏的实时曲线一秒都不会被卡住。
 > 每次调用的 latency_ms 都落库，慢在哪一眼就能看到——没有 Key 的时候，整套演示照样跑得完。」
+
+---
+
+## 难点四：ECharts Graph 节点被画布裁切
+
+### 背景现象
+
+V2 的因果推演树用 ECharts 的 `graph` 系列渲染。上线后发现一个很扎眼的问题：
+**最左侧节点的文字被画布左边界切掉了一半**。
+
+我们试了三种直觉解法，全部无效：
+
+1. 把 `series` 的 `left` / `right` 设成百分比 —— 没用；
+2. 把节点宽度从 200px 一路加到 **340px** —— 不但没用，文字反而溢出更多；
+3. 缩小 `symbolSize` —— 文字还是被裁，只是裁得更难看。
+
+### 根因分析
+
+翻 ECharts 源码才找到真正的原因：`echarts/lib/chart/graph/createView.js` 的 `createViewCoordSys()`
+在计算自动适配的包围盒时，**只把节点的中心点喂给 `bbox.fromPoints(positions)`**——
+`symbolSize` **完全不参与包围盒计算**。
+
+这解释了我们踩的全部三个坑：
+
+1. 包围盒只知道「中心点在哪」，不知道「节点有多宽」，所以**任何基于百分比的内边距都挡不住 symbol 与文字溢出画布**；
+2. 把节点加宽只会让文字更宽、溢出更多，因为**包围盒根本没变**；
+3. 缩小 symbol 只改变了绘制尺寸，同样不影响包围盒。
+
+**一句话**：我们以为在跟「画布内边距」较劲，其实是在跟「包围盒压根不考虑节点尺寸」较劲。
+
+### 解决方案
+
+**核心思路：既然包围盒只认节点，那我们就造两个「节点」把包围盒撑开。**
+
+**第一层：往 `series.data` 里塞两个零尺寸撑边节点。**
+
+```js
+// frontend/src/components/ReasoningTree.vue
+// 自身不可见（symbolSize 0 + opacity 0）、无标签、不参与 tooltip。
+function padNode(x, y) {
+  return {
+    name: '__pad__', x, y,
+    symbolSize: 0,
+    itemStyle: { opacity: 0 },
+    label: { show: false },
+    tooltip: { show: false },
+  }
+}
+// …在真实节点之后追加：
+padNode(range.xMin, range.yMin),
+padNode(range.xMax, range.yMax)
+```
+
+两个撑边节点分别落在真实节点集合的**外沿之外**，于是 `bbox.fromPoints` 算出来的包围盒被撑到真实节点之外。
+
+**第二层：像素级内边距 `PAD = 18`，得到 1:1 变换。**
+
+撑边节点的坐标不是拍脑袋写的，而是从布局函数里算出来的：
+
+```js
+const PAD = 18
+const ch = H - PAD * 2
+const x0 = PAD + widths[0] / 2
+const x1 = W - PAD - widths[last] / 2
+// …
+return { xMin: PAD, xMax: W - PAD, yMin: PAD, yMax: H - PAD }
+```
+
+这样「撑边节点定义的包围盒」与「series 内边距」**严格重合**，缩放变换退化成 **1:1**，
+节点位置完全可预测——不再需要跟 ECharts 的自动适配讨价还价。
+
+**第三层：节点宽度改用 canvas `measureText` 实测，不再按字数估算。**
+
+```js
+// 节点矩形必须真正包住文字：ECharts graph 的自动适配只按 symbolSize 计算包围盒，
+// 因此宽度不按字数估算，而是用 canvas measureText 量真实文本宽度
+const NODE_PAD_X = 24
+const w = Math.min(NODE_MAX_W, Math.max(NODE_MIN_W, Math.ceil(Math.max(labelW, subW)) + NODE_PAD_X))
+```
+
+中文与英文的字符宽度差很多，按字数估算必然在某一侧翻车；`measureText` 量出来的是**真实像素宽度**。
+
+### 量化收益
+
+在 **2 倍缩放**下做像素测量（这样 1px 的偏差也能看出来）：
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| 最左节点左边界距画布 | 负值（文字被裁掉） | **leftGap = 19 px** |
+| 最右节点右边界距画布 | 负值（文字被裁掉） | **rightGap = 20 px** |
+| 第 3 条边的左端越界像素 | > 0 | **edgeLeft3 = 0** |
+| 第 3 条边的右端越界像素 | > 0 | **edgeRight3 = 0** |
+
+四个数字里，前两个证明「留白刚刚好」（约等于 `PAD = 18`），后两个证明「零越界像素」。
+
+### 一句话演讲口径
+
+> 「ECharts 的 graph 自动适配有一个反直觉的坑：它算包围盒时**只看节点中心点，不看节点尺寸**，
+> 所以我们把节点宽度加到 340 像素照样被裁。
+> 最后我们的解法是往数据里塞两个不可见的『撑边节点』，把包围盒人为撑到真实节点之外，
+> 再配合 18 像素的像素级内边距拿到 1:1 变换——现在最左最右的留白分别是 19 和 20 像素，越界像素为零。」
+
+---
+
+## 难点五：SPA 深链白屏
+
+### 背景现象
+
+访问一个多段深链（例如 `/nope/deep`），**整页白屏**：
+
+- `#app` 里**零子节点**——Vue 根本没挂载；
+- 控制台报：
+
+```
+Failed to load module script: Expected a JavaScript-or-Wasm module script
+but the server responded with a MIME type of "text/html".
+```
+
+诡异的是**首页 `/` 一切正常**，只有深链白屏。演示现场只要有人在子页面按一下刷新，屏幕就白了。
+
+### 根因分析
+
+这是一条**三段接力**的故障链：
+
+1. `frontend/vite.config.js` 的 `base: './'` 让 `index.html` 用**相对路径**引用产物：`./assets/index-*.js`；
+2. 在深链 `/nope/deep` 下，浏览器把 `./assets/index-*.js` 解析成 **`/nope/assets/index-*.js`**；
+3. 这个路径当然不存在，于是走到 SPA 回退——而当时的回退逻辑是「**任何未知路径都返回 `index.html`**」，
+   于是浏览器拿到一个 `content-type: text/html` 的『JS 文件』，按 HTML 规范因 MIME 不符**拒绝执行**。
+
+JS 从未运行 → Vue 从未挂载 → `#app` 零子节点 → **白屏**。
+
+**这里有一个必须写下来的中间结论**：我们第一版修法是「让资源类请求不要回退，直接 404」。
+这个改动**方向是对的，但只做这一件事并不充分**——
+因为 `/nope/assets/index-*.js` 虽然会正确地 404 了，可 `index.html` 里的相对路径**仍然是错的**，
+下一次仍然会去 `/nope/assets/` 找产物。**必须同时把相对路径的解析基准掰回来。**
+
+### 解决方案
+
+在 `backend/app/main.py` 里把回退逻辑拆成三类，分别处理：
+
+```python
+# 资源类请求的扩展名集合：这类路径未命中时必须真 404（JSON），
+# 绝不能回退 index.html —— 否则浏览器会拿到 content-type: text/html 的
+# module script，按 HTML 规范因 MIME 不符拒绝执行，整页白屏。
+_ASSET_EXTENSIONS = frozenset({
+    ".js", ".mjs", ".cjs", ".css", ".map", ".json",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp4", ".webm", ".wasm",
+})
+
+def _is_asset_request(normalized: str) -> bool:
+    if normalized.startswith("assets/"):
+        return True
+    return Path(normalized).suffix.lower() in _ASSET_EXTENSIONS
+
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            normalized = path.replace("\\", "/")
+            if exc.status_code == 404:
+                if normalized.startswith("api/"):
+                    raise                      # ① /api/** 保持 FastAPI 标准 404
+                if _is_asset_request(normalized):
+                    raise                      # ② 资源类请求：真 404，不回退
+                index_path = Path(self.directory) / "index.html"
+                if index_path.is_file():
+                    return self._navigation_response(index_path, scope)  # ③ 页面导航回退
+            raise
+```
+
+**第三类（页面导航回退）里做注入**——这是修掉「相对路径基准」的那一步：
+
+```python
+def _navigation_response(self, index_path: Path, scope) -> Response:
+    base = scope.get("root_path") or "/"
+    if not base.endswith("/"):
+        base += "/"
+    try:
+        html = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return FileResponse(index_path)
+    if "<base " not in html:
+        html = html.replace("<head>", f'<head>\n    <base href="{base}">', 1)
+    return HTMLResponse(html)
+```
+
+注入 `<base href="/">` 后，`./assets/index-*.js` 重新解析回 `/assets/index-*.js`，产物正常加载。
+
+**三个关键设计取舍：**
+
+1. **只在回退路径上注入**——真实存在的 `/` 仍由 `StaticFiles` 原样返回，正常访问零开销、零副作用；
+2. **不修改磁盘上的 `frontend/dist/index.html`**——注入发生在**响应体**里，构建产物保持纯净；
+3. **`api/` 前缀仍然直接 404**——SPA 回退绝不能吞掉接口路径，否则前端永远拿到 `index.html`。
+
+### 量化收益
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| 访问 `/nope/deep` 的 `#app` 子节点数 | **0**（白屏） | **1**（正常渲染） |
+| 控制台报错数 | MIME 类型错误 | **0** |
+| `/nope/assets/*.js` 的响应 | 200 `text/html`（浏览器拒绝执行） | **404 `application/json`** |
+| `/api/nonexistent` 的响应 | 200 `index.html`（被回退吞掉） | **404 `application/json`**（FastAPI 标准错误体） |
+| 磁盘构建产物 | —— | **未被修改**（注入只发生在响应体） |
+
+### 一句话演讲口径
+
+> 「深链白屏看起来像个前端 bug，其实是后端回退策略的问题。
+> 我们一开始以为『让资源类请求返回 404 就好了』，后来发现**这个中间结论并不充分**——
+> 因为 `index.html` 里用的是相对路径，深链下它的解析基准本身就是错的。
+> 真正的解法是两步：资源类请求真 404 不回退，页面导航回退时在**响应体里**注入 `<base>` 标签把基准掰回应用根。
+> 现在 `/nope/deep` 的挂载节点数从 0 变成 1，控制台零报错，而且磁盘上的构建产物一个字节都没改。」
 
 ---
 
