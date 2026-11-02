@@ -30,7 +30,7 @@ def _float(name: str, default: float) -> float:
 
 # ---- 应用 ----
 APP_PORT = _int("APP_PORT", 8000)
-APP_VERSION = _str("APP_VERSION", "1.0.0")
+APP_VERSION = _str("APP_VERSION", "2.0.0")
 
 # ---- 数据 ----
 # 容器内由 .env 提供 DATA_DIR=/data、DB_PATH=/data/agri.db；裸机开发回落到仓库内 data/。
