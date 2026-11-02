@@ -38,8 +38,8 @@
           模型 <b class="mono model-name">{{ modelName }}</b>
         </span>
 
-        <label class="switch" title="大字模式将在第三步交付">
-          <input type="checkbox" v-model="bigFont" @change="onBigFont" />
+        <label class="switch" title="大字模式：隐藏复杂面板，只保留最高优先级告警与干预建议">
+          <input type="checkbox" v-model="bigFont" @change="onBigFont(bigFont)" />
           <span class="track"><span class="knob"></span></span>
           <span class="sw-label">大字模式</span>
         </label>
@@ -52,8 +52,25 @@
 
     <p v-if="errors.length" class="err-inline mv-err">接口异常：{{ errors.join(' ｜ ') }}</p>
 
-    <!-- 主体：左 2.5D 地块 / 中 因果树 / 下 AI 双轨对话 -->
-    <main class="mv-grid">
+    <!-- 大字模式：全屏重排的超大号卡片视图。
+         这里刻意用 v-if 而不是 v-show —— 大字模式要「隐藏复杂面板」，
+         但推演树画布必须活下来（见 .mv-body 的 v-show 说明），
+         所以真正承载 ECharts 的 .mv-body 用 v-show 隐藏而非卸载。 -->
+    <AccessiblePanel
+      v-if="bigFont"
+      :alerts="alerts"
+      :reasoning="reasoning"
+      :devices="devices"
+      class="mv-accessible"
+      @close="onBigFont(false)"
+    />
+
+    <!-- 主体：左 2.5D 地块 / 中 因果树 / 下 AI 双轨对话
+         大字模式用 v-show 而非 v-if：ReasoningTree 的 .rt-chart 一旦被卸载，
+         ECharts 实例会失去宿主 DOM；虽然 render() 有重建逻辑，
+         但 props.result 未变时 watch 不触发，重建时机不可靠。
+         display:none 让容器仍在文档流中，关闭大字模式后 chart 直接可见且尺寸不变。 -->
+    <main v-show="!bigFont" class="mv-grid mv-body">
       <section class="cell left">
         <PlotGrid25D
           :plots="plots"
@@ -97,7 +114,7 @@
       </section>
     </main>
 
-    <footer class="footer">
+    <footer v-show="!bigFont" class="footer">
       <span>轮询间隔 {{ POLL_INTERVAL_MS / 1000 }}s</span>
       <span>推演 POST /api/reasoning/simulate · 指令 POST /api/command/execute</span>
       <span class="mono">{{ lastTick || '尚未同步' }}</span>
@@ -110,6 +127,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import AccessiblePanel from '../components/AccessiblePanel.vue'
 import AiChat from '../components/AiChat.vue'
 import PlotGrid25D from '../components/PlotGrid25D.vue'
 import ReasoningTree from '../components/ReasoningTree.vue'
@@ -263,9 +281,12 @@ function onCommandExecuted({ node, res }) {
   aiRef.value?.updateReasoningCommand?.(node?.id, res)
 }
 
-function onBigFont() {
-  bigFont.value = false
-  pushToast('大字模式将在第三步交付，本步骤仅保留入口位。', { kind: 'info' })
+// 大字模式：可逆切换。开启时桌面复杂面板整体 display:none（不卸载 DOM），
+// 关闭时原样恢复；推演树实例因此始终存活，不会重现「canvas 永久空白」。
+function onBigFont(next) {
+  const on = typeof next === 'boolean' ? next : !!bigFont.value
+  bigFont.value = on
+  pushToast(on ? '已进入大字模式：仅显示最高优先级告警与干预建议' : '已退出大字模式，全部面板已恢复', { kind: on ? 'warn' : 'ok' })
 }
 
 function onSaved(cfg) {
@@ -296,6 +317,8 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.mv-accessible { flex: 1; }
+
 .mv { min-height: 100%; display: flex; flex-direction: column; gap: var(--v2-gap); padding: var(--v2-gap); max-width: 2200px; margin: 0 auto; }
 
 .mv-top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 9px 14px; }

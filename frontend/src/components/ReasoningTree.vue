@@ -317,6 +317,10 @@ function render() {
       // 布局按容器像素算，尺寸变化必须重算布局，只 resize 会留下旧的节点坐标
       ro = new ResizeObserver(() => {
         if (!chart || !chartEl.value) return
+        // 容器被 display:none 隐藏（大字模式）时 clientWidth/Height 为 0：
+        // 此时 resize 会把画布压成 100×0 并丢掉布局，直接跳过、保留最后一张有效画布。
+        // 恢复显示时 RO 会再触发一次，届时按真实尺寸重建。
+        if (!chartEl.value.clientWidth || !chartEl.value.clientHeight) return
         chart.resize()
         chart.setOption(buildOption(), true)
       })
