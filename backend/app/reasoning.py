@@ -118,6 +118,11 @@ def _round(value, digits: int = 1):
     return None if value is None else round(float(value), digits)
 
 
+def _num(value, unit: str = "") -> str:
+    """诚实渲染：无采样时显示「暂无数据」，绝不显示字面 None。"""
+    return "暂无数据" if value is None else f"{value}{unit}"
+
+
 def _stats(rows: list[dict], key: str) -> dict:
     values = [float(r[key]) for r in rows if r.get(key) is not None]
     if not values:
@@ -317,8 +322,9 @@ def _whitebox(context: dict, prior: dict, payload: dict, raw_response: str | Non
     step1 = (
         f"读取 {plot['name']} 最近 {context['window_minutes']} 分钟遥测，共 {len(samples)} 条样本"
         f"（设备 {', '.join(context.get('device_codes') or []) or '无'}）："
-        f"气温 {m.get('temperature')}℃、湿度 {m.get('humidity')}%、墒情 {m.get('soil_moisture')}%、"
-        f"土温 {m.get('soil_temp')}℃、电量 {m.get('battery')}%；"
+        f"气温 {_num(m.get('temperature'), '℃')}、湿度 {_num(m.get('humidity'), '%')}、"
+        f"墒情 {_num(m.get('soil_moisture'), '%')}、土温 {_num(m.get('soil_temp'), '℃')}、"
+        f"电量 {_num(m.get('battery'), '%')}；"
         + (
             f"气象：{w.get('condition')} {w.get('temperature')}℃ 湿度 {w.get('humidity')}% "
             f"降水 {w.get('rainfall_mm')}mm {w.get('wind_dir')}风 {w.get('wind_level')} 级"

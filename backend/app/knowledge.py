@@ -30,6 +30,11 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _num(value, unit: str = "") -> str:
+    """诚实渲染：无采样时显示「暂无数据」，绝不显示字面 None。"""
+    return "暂无数据" if value is None else f"{value}{unit}"
+
+
 # ---------------- 规则表（白盒要"真"，每条规则可解释） ----------------
 def _duration_factor(hours_below_min: float) -> float:
     """持续时间因子：0h→0，≥24h→1，中间线性。"""
@@ -275,8 +280,8 @@ def summarize(context: dict, prior: dict) -> str:
     metrics = context["metrics"]
     if prior["yield_loss_pct"] <= 0:
         return (
-            f"{plot.get('name')} 当前墒情 {metrics.get('soil_moisture')}%、"
-            f"气温 {metrics.get('temperature')}℃，各项指标处于正常区间，暂无减产风险。"
+            f"{plot.get('name')} 当前墒情 {_num(metrics.get('soil_moisture'), '%')}、"
+            f"气温 {_num(metrics.get('temperature'), '℃')}，各项指标处于正常区间，暂无减产风险。"
         )
     return (
         f"{plot.get('name')} 处于{_level_cn(prior['level'])}水分胁迫，"
@@ -299,6 +304,9 @@ def build_fallback_tree(context: dict, prior: dict, generated_at: str) -> dict:
     soil = metrics.get("soil_moisture")
     temp = metrics.get("temperature")
     hum = metrics.get("humidity")
+    # weather 表为空时 context_snapshot 返回 None：必须与 reasoning.py 一致地兜底，
+    # 否则 dict.get(k, {}) 只在键缺失时生效、键存在值为 None 时仍返回 None。
+    weather = context.get("weather") or {}
 
     root_severity = {"critical": "high", "warn": "warn", "normal": "good"}[prior["level"]]
     nodes: list[dict] = [
@@ -307,7 +315,7 @@ def build_fallback_tree(context: dict, prior: dict, generated_at: str) -> dict:
             "type": "current",
             "level": 0,
             "label": "当前数据",
-            "sub": f"墒情 {soil}% · 气温 {temp}℃ · 湿度 {hum}%",
+            "sub": f"墒情 {_num(soil, '%')} · 气温 {_num(temp, '℃')} · 湿度 {_num(hum, '%')}",
             "severity": root_severity,
         }
     ]
@@ -336,7 +344,7 @@ def build_fallback_tree(context: dict, prior: dict, generated_at: str) -> dict:
             "level": 1,
             "parent": "root",
             "label": "减产风险 0%",
-            "sub": f"墒情 {soil}% ≥ 正常下限 {soil_th['min']}%",
+            "sub": f"墒情 {_num(soil, '%')} ≥ 正常下限 {soil_th['min']}%",
             "severity": "good",
         })
         links.append({"source": "root", "target": node_id})
@@ -382,10 +390,15 @@ def build_fallback_tree(context: dict, prior: dict, generated_at: str) -> dict:
             "detail": (
                 f"读取 {plot.get('name')} 最近 {config.REASONING_WINDOW_MINUTES} 分钟遥测"
                 f"（{len(context.get('window_samples') or [])} 条样本）："
-                f"气温 {temp}℃、湿度 {hum}%、墒情 {soil}%、土温 {metrics.get('soil_temp')}℃、"
-                f"电量 {metrics.get('battery')}%；气象 "
-                f"{context.get('weather', {}).get('condition')} "
-                f"{context.get('weather', {}).get('temperature')}℃"
+                f"气温 {_num(temp, '℃')}、湿度 {_num(hum, '%')}、墒情 {_num(soil, '%')}、"
+                f"土温 {_num(metrics.get('soil_temp'), '℃')}、电量 {_num(metrics.get('battery'), '%')}；"
+                + (
+                    f"气象：{weather.get('condition')} {weather.get('temperature')}℃ "
+                    f"湿度 {weather.get('humidity')}% 降水 {weather.get('rainfall_mm')}mm "
+                    f"{weather.get('wind_dir')}风 {weather.get('wind_level')} 级"
+                    if weather
+                    else "气象：暂无数据（模拟器尚未上报 agri/weather 主题）"
+                )
             ),
             "ts": generated_at,
         },
