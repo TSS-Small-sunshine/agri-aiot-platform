@@ -1,7 +1,7 @@
 {
   "name": "agri-aiot-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "description": "智慧农业 AIoT 平台数据大屏（Vue3 + Vite）",
   "scripts": {

@@ -15,21 +15,23 @@
     <p v-else-if="modelsNotice" class="notice-inline">{{ modelsNotice }}</p>
 
     <div class="body">
-      <div class="main">
-        <div class="controls">
-          <label class="ctl">
-            <span>模型</span>
-            <select v-model="model" :disabled="!models.length">
-              <option v-if="!models.length" value="">无可用模型</option>
-              <option v-for="m in models" :key="m.id" :value="m.id">
-                {{ m.label }}（{{ m.source }}）
-              </option>
-            </select>
-          </label>
-          <button class="btn" :disabled="loading || !models.length" @click="loadModels">刷新模型</button>
-        </div>
+      <div class="controls">
+        <label class="ctl">
+          <span>模型</span>
+          <select v-model="model" :disabled="!models.length">
+            <option v-if="!models.length" value="">无可用模型</option>
+            <option v-for="m in models" :key="m.id" :value="m.id">
+              {{ m.label }}（{{ m.source }}）
+            </option>
+          </select>
+        </label>
+        <button class="btn" :disabled="loading || !models.length" @click="loadModels">刷新模型</button>
+        <button class="btn hist-toggle" type="button" @click="historyOpen = !historyOpen">
+          {{ historyOpen ? '收起历史' : `历史 ${history.length}` }}
+        </button>
+      </div>
 
-        <div ref="scrollEl" class="messages">
+      <div ref="scrollEl" class="messages">
           <div v-if="!messages.length" class="empty">
             向 AI 农技助手提问，例如「柑橘叶子发黄怎么办」「墒情低于 35% 要浇水吗」
           </div>
@@ -54,21 +56,21 @@
           </div>
         </div>
 
-        <div class="compose">
-          <textarea
-            v-model="question"
-            rows="2"
-            placeholder="输入问题，Ctrl + Enter 发送"
-            :disabled="loading"
-            @keydown.ctrl.enter.prevent="send"
-          ></textarea>
-          <button class="btn" :disabled="loading || !question.trim()" @click="send">
-            {{ loading ? '发送中…' : '发送' }}
-          </button>
-        </div>
+      <div class="compose">
+        <textarea
+          v-model="question"
+          rows="2"
+          placeholder="输入问题，Ctrl + Enter 发送"
+          :disabled="loading"
+          @keydown.ctrl.enter.prevent="send"
+        ></textarea>
+        <button class="btn" :disabled="loading || !question.trim()" @click="send">
+          {{ loading ? '发送中…' : '发送' }}
+        </button>
       </div>
 
-      <aside class="history">
+      <!-- 历史侧栏：默认收起，标题栏按钮展开；在 25% 右栏宽度下不再与消息区互挤 -->
+      <aside v-show="historyOpen" class="history">
         <div class="history-head">
           <span>历史记录</span>
           <button class="btn" :disabled="historyLoading" @click="loadHistory">刷新</button>
@@ -118,6 +120,8 @@ const history = ref([])
 const historyLoading = ref(false)
 const historyError = ref('')
 const scrollEl = ref(null)
+// 历史侧栏默认收起：右栏只占 25% 宽度，展开的侧栏会把消息区压到看不见
+const historyOpen = ref(false)
 
 const shortTs = (ts) => (ts && String(ts).length >= 19 ? String(ts).slice(5, 19).replace('T', ' ') : ts || '--')
 
@@ -250,15 +254,18 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.aichat { display: flex; flex-direction: column; height: 100%; }
-.body { display: flex; gap: 12px; flex: 1; min-height: 0; }
-.main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
-.controls { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.ctl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-sub); }
-.ctl select { max-width: 230px; }
+/* V2.1 右栏 AI 终端：纵向排布（模型行 → 消息区 → 输入框），消息区撑满剩余高度。
+   历史侧栏改为可折叠并压在消息区上方，避免在 25% 宽度下互相挤压。
+   变量全部使用 --v2-*：V1 变量只在 .legacy-scope 内定义，在 V2 路由下整条声明会作废。 */
+.aichat { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.body { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto; }
+.ctl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--v2-sub); min-width: 0; }
+.ctl select { max-width: 190px; }
+.hist-toggle { flex: 0 0 auto; }
 .messages {
   flex: 1;
-  min-height: 120px;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -268,78 +275,74 @@ onMounted(() => {
 .msg { display: flex; }
 .msg.user { justify-content: flex-end; }
 .bubble {
-  max-width: 82%;
+  max-width: 88%;
   border-radius: 10px;
   padding: 7px 10px;
   font-size: 12.5px;
-  border: 1px solid var(--line-soft);
-  background: rgba(9, 17, 31, 0.6);
+  border: 1px solid var(--v2-line-soft);
+  background: rgba(15, 23, 42, 0.6);
 }
 .msg.user .bubble {
-  background: rgba(34, 211, 238, 0.12);
-  border-color: rgba(34, 211, 238, 0.42);
+  background: rgba(0, 229, 255, 0.12);
+  border-color: rgba(0, 229, 255, 0.42);
 }
-.msg.assistant .bubble { border-left: 2px solid var(--green); }
-.meta { font-size: 10px; color: var(--text-faint); margin-bottom: 3px; }
-.text { white-space: pre-wrap; word-break: break-word; color: var(--text-main); }
+.msg.assistant .bubble { border-left: 2px solid var(--v2-green); }
+.meta { font-size: 10px; color: var(--v2-sub); margin-bottom: 3px; }
+.text { white-space: pre-wrap; word-break: break-word; color: var(--v2-text); }
 .degraded-tag {
-  margin-left: 6px; font-size: 9.5px; color: #fbbf24;
-  border: 1px solid rgba(251, 191, 36, 0.5); border-radius: 8px; padding: 0 5px;
+  margin-left: 6px; font-size: 9.5px; color: var(--v2-warn);
+  border: 1px solid rgba(255, 179, 0, 0.5); border-radius: 8px; padding: 0 5px;
 }
 /* 三段式来源标签：绿=主模型生成 / 黄=已校正 / 红=离线降级 */
 .src-tag {
   display: inline-block; margin-right: 6px;
   font-size: 9.5px; letter-spacing: 0.04em;
-  border: 1px solid var(--line-soft); border-radius: 2px; padding: 0 5px;
+  border: 1px solid var(--v2-line-soft); border-radius: 2px; padding: 0 5px;
 }
-.src-tag.green { color: var(--green); border-color: rgba(52, 211, 153, 0.5); }
-.src-tag.warn { color: #fbbf24; border-color: rgba(251, 191, 36, 0.5); }
-.src-tag.red { color: var(--red); border-color: rgba(244, 63, 94, 0.5); }
+.src-tag.green { color: var(--v2-green); border-color: rgba(0, 230, 118, 0.5); }
+.src-tag.warn { color: var(--v2-warn); border-color: rgba(255, 179, 0, 0.5); }
+.src-tag.red { color: var(--v2-red); border-color: rgba(255, 59, 48, 0.5); }
 .mock-badge {
-  font-size: 10px; color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.5);
-  background: rgba(251, 191, 36, 0.1); border-radius: 9px; padding: 1px 7px;
+  font-size: 10px; color: var(--v2-warn); border: 1px solid rgba(255, 179, 0, 0.5);
+  background: rgba(255, 179, 0, 0.1); border-radius: 9px; padding: 1px 7px;
 }
 .live-badge {
-  font-size: 10px; color: var(--green); border: 1px solid rgba(52, 211, 153, 0.5);
-  background: rgba(52, 211, 153, 0.1); border-radius: 9px; padding: 1px 7px;
+  font-size: 10px; color: var(--v2-green); border: 1px solid rgba(0, 230, 118, 0.5);
+  background: rgba(0, 230, 118, 0.1); border-radius: 9px; padding: 1px 7px;
 }
 .typing i {
   display: inline-block; width: 5px; height: 5px; border-radius: 50%;
-  background: var(--cyan); margin-right: 3px; animation: blink 1.1s infinite;
+  background: var(--v2-cyan); margin-right: 3px; animation: blink 1.1s infinite;
 }
 .typing i:nth-child(2) { animation-delay: 0.18s; }
 .typing i:nth-child(3) { animation-delay: 0.36s; }
 @keyframes blink { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
-.compose { display: flex; gap: 8px; margin-top: 8px; }
+.compose { display: flex; gap: 8px; flex: 0 0 auto; }
 .compose textarea { flex: 1; resize: none; }
 .history {
-  width: 232px;
-  flex: 0 0 232px;
-  border-left: 1px solid var(--line-soft);
-  padding-left: 10px;
+  flex: 0 1 auto;
+  max-height: 42%;
+  border-top: 1px solid var(--v2-line-soft);
+  padding-top: 8px;
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 .history-head {
   display: flex; align-items: center; justify-content: space-between;
-  font-size: 12px; color: var(--text-sub); margin-bottom: 6px;
+  font-size: 12px; color: var(--v2-sub); margin-bottom: 6px;
 }
 .history-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 6px; }
 .hitem {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--v2-line-soft);
+  border-radius: var(--v2-r-sm);
   padding: 6px 8px;
   cursor: pointer;
-  background: rgba(9, 17, 31, 0.5);
+  background: rgba(15, 23, 42, 0.5);
 }
-.hitem:hover { border-color: var(--cyan); }
-.hq { font-size: 12px; color: var(--text-main); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ha { font-size: 11px; color: var(--text-sub); margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hmeta { font-size: 9.5px; color: var(--text-faint); }
+.hitem:hover { border-color: var(--v2-cyan); }
+.hq { font-size: 12px; color: var(--v2-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ha { font-size: 11px; color: var(--v2-sub); margin: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hmeta { font-size: 9.5px; color: var(--v2-sub); }
 .sk-list { display: flex; flex-direction: column; gap: 6px; }
-@media (max-width: 1100px) {
-  .body { flex-direction: column; }
-  .history { width: auto; flex: 0 0 auto; border-left: none; border-top: 1px solid var(--line-soft); padding: 8px 0 0; max-height: 180px; }
-}
 </style>

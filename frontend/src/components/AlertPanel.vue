@@ -69,36 +69,36 @@ async function onAck(id) {
 </script>
 
 <style scoped>
-.alerts { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-.list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+/* V2.1 左栏紧凑形态：变量全部改用 --v2-*（V1 变量只在 .legacy-scope 内定义，在 V2 下会作废） */
+.alerts { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
+.list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
 .item {
-  border: 1px solid var(--line-soft);
-  border-left: 3px solid var(--text-faint);
-  border-radius: var(--radius-sm);
-  background: rgba(9, 17, 31, 0.55);
-  padding: 7px 10px;
+  border: 1px solid var(--v2-line-soft);
+  border-left: 3px solid var(--v2-sub);
+  border-radius: var(--v2-r-sm);
+  background: rgba(15, 23, 42, 0.55);
+  padding: 6px 8px;
 }
 .item.unacked {
-  border-left-color: var(--red);
-  border-color: rgba(244, 63, 94, 0.45);
-  background: var(--red-soft);
-  box-shadow: var(--glow-red);
+  border-left-color: var(--v2-red);
+  border-color: rgba(255, 59, 48, 0.45);
+  background: rgba(255, 59, 48, 0.10);
   animation: alert-pulse 2.2s ease-in-out infinite;
 }
-.item.unacked.critical { border-color: rgba(244, 63, 94, 0.75); }
+.item.unacked.critical { border-color: rgba(255, 59, 48, 0.75); }
 @keyframes alert-pulse {
-  0%, 100% { box-shadow: 0 0 10px rgba(244, 63, 94, 0.3); }
-  50% { box-shadow: 0 0 18px rgba(244, 63, 94, 0.6); }
+  0%, 100% { box-shadow: 0 0 10px rgba(255, 59, 48, 0.3); }
+  50% { box-shadow: 0 0 18px rgba(255, 59, 48, 0.6); }
 }
-.head { display: flex; align-items: center; gap: 7px; font-size: 11px; }
-.lvl { border-radius: 9px; padding: 0 7px; border: 1px solid; font-size: 10px; }
-.lvl.warning { color: #fbbf24; border-color: rgba(251, 191, 36, 0.5); background: rgba(251, 191, 36, 0.1); }
-.lvl.critical { color: var(--red); border-color: rgba(244, 63, 94, 0.6); background: rgba(244, 63, 94, 0.16); }
-.dev { color: var(--text-sub); }
-.time { margin-left: auto; color: var(--text-faint); }
-.msg { font-size: 12.5px; margin: 5px 0; color: var(--text-main); }
-.foot { display: flex; align-items: center; gap: 10px; }
-.metric { font-size: 11px; color: var(--text-sub); flex: 1; }
-.acked-tag { font-size: 11px; color: var(--text-faint); }
+.head { display: flex; align-items: center; gap: 6px; font-size: 10.5px; }
+.lvl { border-radius: 9px; padding: 0 6px; border: 1px solid; font-size: 9.5px; }
+.lvl.warning { color: var(--v2-warn); border-color: rgba(255, 179, 0, 0.5); background: rgba(255, 179, 0, 0.1); }
+.lvl.critical { color: var(--v2-red); border-color: rgba(255, 59, 48, 0.6); background: rgba(255, 59, 48, 0.16); }
+.dev { color: var(--v2-sub); }
+.time { margin-left: auto; color: var(--v2-sub); }
+.msg { font-size: 11.5px; margin: 4px 0; color: var(--v2-text); }
+.foot { display: flex; align-items: center; gap: 8px; }
+.metric { font-size: var(--v2-fs-aux); color: var(--v2-sub); flex: 1; }
+.acked-tag { font-size: var(--v2-fs-aux); color: var(--v2-sub); }
 .sk-list { display: flex; flex-direction: column; gap: 8px; }
 </style>

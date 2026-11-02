@@ -1,7 +1,7 @@
 <template>
   <div v-if="items.length" class="sku-card">
     <div class="sku-head">
-      <span class="sku-title">推荐农资</span>
+      <span class="sku-title">{{ showAll ? '农资商城' : '推荐农资' }}</span>
       <span class="sku-kw mono nowrap" :title="keywordText">{{ keywordText }}</span>
     </div>
     <ul class="sku-list">
@@ -31,7 +31,9 @@ import { getSkus } from '../api'
 import { pushToast } from '../toast'
 
 const props = defineProps({
-  keywords: { type: Array, default: () => [] }
+  keywords: { type: Array, default: () => [] },
+  // 右栏商城卡：不挂关键词时展示全部 SKU（GET /api/shop/skus 不带 keyword 即全量）
+  showAll: { type: Boolean, default: false }
 })
 
 const items = ref([])
@@ -43,12 +45,14 @@ const price = (v) => (v === null || v === undefined ? '--' : Number(v).toFixed(2
 
 async function load() {
   const kws = (Array.isArray(props.keywords) ? props.keywords : []).filter(Boolean)
-  if (!kws.length) {
+  // 无关键词且未开 showAll：该节点没有农资匹配，优雅隐藏（不渲染）
+  if (!kws.length && !props.showAll) {
     items.value = []
     return
   }
   try {
-    const results = await Promise.all(kws.map((k) => getSkus(k).catch(() => ({ items: [] }))))
+    const queries = kws.length ? kws : ['']
+    const results = await Promise.all(queries.map((k) => getSkus(k || undefined).catch(() => ({ items: [] }))))
     const byId = new Map()
     for (const res of results) {
       for (const it of res?.items || []) if (!byId.has(it.id)) byId.set(it.id, it)
@@ -65,7 +69,7 @@ function add(s) {
   pushToast(`已加入采购清单：${s.name}`, { kind: 'ok' })
 }
 
-watch(() => props.keywords, load, { deep: true, immediate: true })
+watch(() => [props.keywords, props.showAll], load, { deep: true, immediate: true })
 </script>
 
 <style scoped>

@@ -99,6 +99,8 @@ const activeNodeId = ref('')
 const cmdRecords = ref({})
 let chart = null
 let ro = null
+// 上一次布局所用的容器像素尺寸：RO 回调据此判断「尺寸真的变了」才重算，避免打断入场动画
+let lastBox = { w: 0, h: 0 }
 
 const tag = computed(() => sourceTag(props.result))
 const planNodes = computed(() =>
@@ -247,6 +249,16 @@ function buildOption() {
         // 修法：用两个零尺寸「撑边节点」把包围盒撑到真实节点矩形的外沿（见 data 尾部），
         // 再用像素级内边距（数字即 px）留出安全边。
         left: PAD, right: PAD, top: PAD, bottom: PAD,
+        // 生长动画：按层级逐级长出（level*220ms），plan 分支再晚 120ms。
+        // 回调收到的 idx 就是 series.data 的下标；data 尾部还有两个零尺寸撑边节点，
+        // 它们没有 raw.type，必须容错（nodes[idx] 对它们为 undefined）。
+        animationDuration: 1000,
+        animationEasing: 'cubicOut',
+        animationDelay: (idx) => {
+          const n = nodes[idx] || {}
+          if (n.type === 'pad') return 0
+          return (n.level || 0) * 220 + (n.type === 'plan' ? 120 : 0)
+        },
         label: {
           show: true,
           color: PALETTE.text,
@@ -314,18 +326,25 @@ function render() {
     if (chart && chart.getDom() !== chartEl.value) teardown()
     if (!chart) chart = echarts.init(chartEl.value, null, { renderer: 'canvas' })
     if (!ro) {
-      // 布局按容器像素算，尺寸变化必须重算布局，只 resize 会留下旧的节点坐标
+      // 布局按容器像素算，尺寸变化必须重算布局，只 resize 会留下旧的节点坐标。
+      // 但「尺寸没变」时必须直接返回：observe() 会立刻回调一次，若此时再
+      // setOption(buildOption(), true)（notMerge=true 整体重建 series），
+      // 会把刚刚起步的入场动画打断并直接落到终态 —— 生长动画就永远看不到。
       ro = new ResizeObserver(() => {
         if (!chart || !chartEl.value) return
         // 容器被 display:none 隐藏（大字模式）时 clientWidth/Height 为 0：
         // 此时 resize 会把画布压成 100×0 并丢掉布局，直接跳过、保留最后一张有效画布。
         // 恢复显示时 RO 会再触发一次，届时按真实尺寸重建。
         if (!chartEl.value.clientWidth || !chartEl.value.clientHeight) return
+        const { w, h } = chartBox()
+        if (w === lastBox.w && h === lastBox.h) return
+        lastBox = { w, h }
         chart.resize()
         chart.setOption(buildOption(), true)
       })
       ro.observe(chartEl.value)
     }
+    lastBox = chartBox()
     chart.setOption(buildOption(), true)
   })
 }
@@ -336,7 +355,7 @@ onBeforeUnmount(teardown)
 </script>
 
 <style scoped>
-.rt { display: flex; flex-direction: column; min-height: 340px; }
+.rt { display: flex; flex-direction: column; min-height: 0; height: 100%; }
 .t-right { display: flex; align-items: center; gap: 8px; }
 .rt-body { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
 
@@ -347,30 +366,31 @@ onBeforeUnmount(teardown)
 .m-v.danger { color: var(--v2-red); }
 .m-v.warn { color: var(--v2-warn); }
 
-.rt-chart { flex: 1; min-height: 250px; width: 100%; }
+.rt-chart { flex: 1; min-height: 0; width: 100%; }
 
 .rt-loading { flex: 1; display: flex; flex-direction: column; gap: 8px; }
 .sk-graph { flex: 1; min-height: 230px; }
 .rt-hint { margin: 0; font-size: 10.5px; color: var(--v2-sub); text-align: center; }
 .rt-error { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 
-.rt-plans { border-top: 1px dashed var(--v2-line-soft); padding-top: 6px; }
-.rt-plans-head { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--v2-green); margin-bottom: 6px; }
-.rt-plans-head .bar { width: 2px; height: 11px; background: var(--v2-green); border-radius: 1px; }
-.rt-plans-head .sub { font-size: 10px; color: var(--v2-sub); }
-.plan-list { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+/* V2.1：方案条压成单行紧凑条（总高 ≤130px），把画布高度还给推演树 */
+.rt-plans { flex: 0 0 auto; max-height: 130px; overflow-y: auto; border-top: 1px dashed var(--v2-line-soft); padding-top: 4px; }
+.rt-plans-head { display: flex; align-items: center; gap: 6px; font-size: var(--v2-fs-aux); color: var(--v2-green); margin-bottom: 4px; }
+.rt-plans-head .bar { width: 2px; height: 10px; background: var(--v2-green); border-radius: 1px; }
+.rt-plans-head .sub { font-size: 9.5px; color: var(--v2-sub); }
+.plan-list { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 3px; }
 .plan-card {
-  flex: 0 0 262px;
+  flex: 0 0 240px;
   border: 1px solid rgba(0, 230, 118, 0.35);
   border-radius: var(--v2-r-sm);
   background: rgba(0, 230, 118, 0.05);
-  padding: 7px 9px;
+  padding: 5px 7px;
   transition: box-shadow 0.18s, border-color 0.18s;
 }
 .plan-card.active { border-color: var(--v2-green); box-shadow: 0 0 14px rgba(0, 230, 118, 0.28); }
-.plan-head { display: flex; align-items: center; gap: 6px; }
+.plan-head { display: flex; align-items: center; gap: 5px; }
 .good-dot { background: var(--v2-green); box-shadow: 0 0 7px var(--v2-green); }
-.plan-label { flex: 1; font-size: 12px; font-weight: 600; color: var(--v2-text); }
-.plan-sub { margin: 3px 0 0; font-size: 10.5px; color: var(--v2-sub); }
-.plan-dev, .plan-effect { margin: 3px 0 0; font-size: 10px; color: var(--v2-sub); }
+.plan-label { flex: 1; font-size: 11.5px; font-weight: 600; color: var(--v2-text); line-height: 1.3; }
+.plan-sub { margin: 2px 0 0; font-size: 10px; line-height: 1.35; color: var(--v2-sub); }
+.plan-dev, .plan-effect { margin: 2px 0 0; font-size: 9.5px; line-height: 1.35; color: var(--v2-sub); }
 </style>

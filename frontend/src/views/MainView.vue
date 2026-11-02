@@ -81,6 +81,28 @@
           :levels="plotLevels"
           @select="onSelectPlot"
         />
+        <!-- 核心指标卡：取自已 fetch 的 /api/telemetry/summary -->
+        <div class="panel kpi-panel">
+          <div class="panel-title">
+            <span class="t-left"><span class="bar"></span>核心指标</span>
+            <span class="sub">近 {{ SUMMARY_HOURS }}h 均值</span>
+          </div>
+          <div class="kpi-row">
+            <div class="kpi-cell">
+              <span class="kc-label">平均温度</span>
+              <span class="kc-value mono temp">{{ f1(summary?.temperature?.avg) }}<em>℃</em></span>
+            </div>
+            <div class="kpi-cell">
+              <span class="kc-label">平均湿度</span>
+              <span class="kc-value mono humi">{{ f1(summary?.humidity?.avg) }}<em>%</em></span>
+            </div>
+            <div class="kpi-cell">
+              <span class="kc-label">平均墒情</span>
+              <span class="kc-value mono soil">{{ f1(summary?.soil_moisture?.avg) }}<em>%</em></span>
+            </div>
+          </div>
+        </div>
+
         <div class="panel weather">
           <div class="panel-title">
             <span class="t-left"><span class="bar"></span>园区气象</span>
@@ -97,6 +119,14 @@
             <span class="w-item"><i>风向</i><b class="mono">{{ weather.wind_dir || '--' }}</b></span>
           </div>
         </div>
+
+        <AlertPanel
+          class="left-alerts"
+          :alerts="alerts"
+          :loading="alertsLoading"
+          :error="alertsError"
+          @ack="ack"
+        />
       </section>
 
       <section class="cell center">
@@ -109,8 +139,9 @@
         />
       </section>
 
-      <section class="cell bottom">
-        <AiChat ref="aiRef" @error="pushError" />
+      <section class="cell right">
+        <AiChat ref="aiRef" class="right-chat" @error="pushError" />
+        <SkuCard show-all class="right-sku" />
       </section>
     </main>
 
@@ -122,6 +153,7 @@
     </footer>
 
     <SettingsModal :open="settingsOpen" @close="settingsOpen = false" @saved="onSaved" />
+    <ToastHost />
   </div>
 </template>
 
@@ -129,16 +161,21 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import AccessiblePanel from '../components/AccessiblePanel.vue'
 import AiChat from '../components/AiChat.vue'
+import AlertPanel from '../components/AlertPanel.vue'
 import PlotGrid25D from '../components/PlotGrid25D.vue'
 import ReasoningTree from '../components/ReasoningTree.vue'
 import SettingsModal from '../components/SettingsModal.vue'
-import { getAlerts, getConfig, getDevices, getHealth, getMeta, getSummary, getWeatherLatest, reasoningSimulate } from '../api'
+import SkuCard from '../components/SkuCard.vue'
+import ToastHost from '../components/ToastHost.vue'
+import { ackAlert, getAlerts, getConfig, getDevices, getHealth, getMeta, getSummary, getWeatherLatest, reasoningSimulate } from '../api'
 import { ALERT_LIMIT, POLL_INTERVAL_MS, SUMMARY_HOURS } from '../config'
 import { pushToast } from '../toast'
 
 const health = ref(null)
 const devices = ref([])
 const alerts = ref([])
+const alertsLoading = ref(false)
+const alertsError = ref('')
 const meta = ref({})
 const summary = ref(null)
 const weather = ref(null)
@@ -207,11 +244,26 @@ async function loadDevices() {
 }
 
 async function loadAlerts() {
+  alertsLoading.value = true
   try {
     const res = await getAlerts(ALERT_LIMIT, false)
     alerts.value = Array.isArray(res?.items) ? res.items : []
+    alertsError.value = ''
   } catch (err) {
-    pushError(`告警列表加载失败：${err.message}`)
+    alertsError.value = `告警列表加载失败：${err.message}`
+    pushError(alertsError.value)
+  } finally {
+    alertsLoading.value = false
+  }
+}
+
+// 告警一键确认：确认后立即重取，未确认数随之下落
+async function ack(id) {
+  try {
+    await ackAlert(id)
+    await loadAlerts()
+  } catch (err) {
+    pushError(`确认失败：${err.message}`)
   }
 }
 
@@ -319,7 +371,8 @@ onBeforeUnmount(() => {
 <style scoped>
 .mv-accessible { flex: 1; }
 
-.mv { min-height: 100%; display: flex; flex-direction: column; gap: var(--v2-gap); padding: var(--v2-gap); max-width: 2200px; margin: 0 auto; }
+/* 页面锁定视口：height 而非 min-height，配合 .mv-grid 的 minmax(0,1fr) 消除页面级滚动条 */
+.mv { height: 100%; display: flex; flex-direction: column; gap: var(--v2-gap); padding: var(--v2-gap); max-width: 2200px; margin: 0 auto; overflow: hidden; }
 
 .mv-top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 9px 14px; }
 .brand { display: flex; align-items: center; gap: 11px; min-width: 290px; }
@@ -335,7 +388,7 @@ onBeforeUnmount(() => {
 .kpis { display: flex; gap: 9px; flex-wrap: wrap; flex: 1; }
 .kpi { background: rgba(255, 255, 255, 0.03); border: var(--v2-line); border-radius: var(--v2-r-sm); padding: 4px 11px; min-width: 100px; }
 .k-label { display: block; font-size: 10px; color: var(--v2-sub); letter-spacing: 0.05em; }
-.k-value { font-size: 19px; font-weight: 700; color: var(--v2-text); line-height: 1.25; }
+.k-value { font-size: var(--v2-fs-value); font-weight: 700; color: var(--v2-text); line-height: 1.25; }
 .k-value em { font-size: 10.5px; font-style: normal; color: var(--v2-sub); margin-left: 2px; }
 .k-value.soil { color: var(--v2-green); }
 .k-value.danger { color: var(--v2-red); }
@@ -370,21 +423,35 @@ onBeforeUnmount(() => {
 
 .mv-err { margin: 0; }
 
+/* V2.1 三栏商用控制台：左 20 / 中 55 / 右 25，单行锁高不产生页面级滚动条 */
 .mv-grid {
   flex: 1;
+  min-height: 0;
   display: grid;
   gap: var(--v2-gap);
-  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) minmax(280px, auto);
-  grid-template-areas:
-    'left center'
-    'bottom bottom';
+  grid-template-columns: minmax(260px, 20fr) minmax(0, 55fr) minmax(320px, 25fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: 'left center right';
 }
-.cell { min-width: 0; display: flex; flex-direction: column; gap: var(--v2-gap); }
+.cell { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: var(--v2-gap); }
 .left { grid-area: left; }
 .center { grid-area: center; }
-.bottom { grid-area: bottom; }
-.bottom > * { flex: 1; }
+.right { grid-area: right; }
+.center > * { flex: 1; min-height: 0; }
+.left-alerts { flex: 1; min-height: 0; }
+.right-chat { flex: 1; min-height: 0; }
+.right-sku { flex: 0 1 auto; max-height: 34%; overflow-y: auto; }
+
+/* 核心指标卡：KPI 数值 ≥ 20px（三级字号层次的最高一级） */
+.kpi-panel { padding: 8px 11px; }
+.kpi-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.kpi-cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.kc-label { font-size: var(--v2-fs-aux); color: var(--v2-sub); letter-spacing: 0.05em; }
+.kc-value { font-size: var(--v2-fs-value); font-weight: 700; color: var(--v2-text); line-height: 1.15; }
+.kc-value em { font-size: 11px; font-style: normal; color: var(--v2-sub); margin-left: 2px; }
+.kc-value.temp { color: var(--v2-warn); }
+.kc-value.humi { color: var(--v2-cyan); }
+.kc-value.soil { color: var(--v2-green); }
 
 .weather { padding: 8px 11px; }
 .w-grid { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; }
@@ -395,6 +462,12 @@ onBeforeUnmount(() => {
 .footer { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 10.5px; color: var(--v2-sub); padding: 0 3px 3px; }
 
 @media (max-width: 1200px) {
-  .mv-grid { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'left' 'center' 'bottom'; }
+  .mv { height: auto; min-height: 100%; overflow: visible; }
+  .mv-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-template-areas: 'left' 'center' 'right';
+  }
+  .right-sku { max-height: none; }
 }
 </style>
