@@ -10,13 +10,15 @@ WORKDIR /app
 COPY simulator/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY simulator/mock_sensor.py ./mock_sensor.py
+# V2：新增 weather.py（气象 Mock 数据源），与 mock_sensor.py 同目录（脚本式导入）
+COPY simulator/mock_sensor.py simulator/weather.py ./
 
 RUN adduser --disabled-password --gecos "" --uid 10002 sim
 USER sim
 
 ENV MQTT_HOST=mosquitto \
     MQTT_PORT=1883 \
-    SIM_INTERVAL_SECONDS=5
+    SIM_INTERVAL_SECONDS=5 \
+    WEATHER_INTERVAL_SECONDS=30
 
 CMD ["python", "mock_sensor.py"]

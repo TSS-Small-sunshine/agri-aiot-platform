@@ -1,9 +1,11 @@
-"""MQTT 接入：后台线程订阅遥测主题，落库 + 更新 last_seen + 触发阈值判定。
+"""MQTT 接入：后台线程订阅遥测/气象/指令回执，落库 + 更新 last_seen + 触发阈值判定。
 
 关键约束（来自任务书）：
 - 在 lifespan 内后台启动，断线自动重连。
 - Broker 连不上**不得**让整个服务起不来：一律降级为 connected=False，
   /api/health 如实报告，HTTP 接口照常可用。
+- V2 新增：气象上行（agri/weather/{plot}）、指令回执上行（agri/command_ack/{plot}/{device}），
+  以及下行指令 publish()（QoS 1，V2_PLAN.md 第 5 节）。
 """
 from __future__ import annotations
 
@@ -32,6 +34,9 @@ class MqttIngest:
         self._last_error: str | None = None
         self._messages = 0
         self._alerts = 0
+        self._weather = 0
+        self._acks = 0
+        self._published = 0
         self._started = False
 
     # ---- 状态 ----
@@ -47,6 +52,9 @@ class MqttIngest:
                 "last_error": self._last_error,
                 "messages": self._messages,
                 "alerts": self._alerts,
+                "weather": self._weather,
+                "acks": self._acks,
+                "published": self._published,
             }
 
     def _set(self, **kwargs) -> None:
@@ -62,7 +70,13 @@ class MqttIngest:
             return
         self._set(connected=True, last_error=None)
         client.subscribe(config.MQTT_TOPIC, qos=0)
-        log.info("MQTT 已连接 %s:%s，订阅 %s", config.MQTT_HOST, config.MQTT_PORT, config.MQTT_TOPIC)
+        client.subscribe(config.MQTT_WEATHER_TOPIC, qos=0)
+        client.subscribe(config.MQTT_COMMAND_ACK_TOPIC, qos=1)
+        log.info(
+            "MQTT 已连接 %s:%s，订阅 %s | %s | %s",
+            config.MQTT_HOST, config.MQTT_PORT,
+            config.MQTT_TOPIC, config.MQTT_WEATHER_TOPIC, config.MQTT_COMMAND_ACK_TOPIC,
+        )
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         self._set(connected=False, last_error=f"连接断开：{reason_code}")
@@ -78,9 +92,6 @@ class MqttIngest:
     def _handle(self, message) -> None:
         topic = getattr(message, "topic", "")
         parts = topic.split("/")
-        # agri/telemetry/{plot_code}/{device_code}
-        topic_plot = parts[2] if len(parts) >= 4 else None
-        topic_device = parts[3] if len(parts) >= 4 else None
 
         try:
             payload = json.loads(message.payload.decode("utf-8", errors="replace"))
@@ -90,6 +101,24 @@ class MqttIngest:
         if not isinstance(payload, dict):
             log.warning("丢弃非对象 payload，topic=%s", topic)
             return
+
+        if parts[:2] == ["agri", "weather"]:
+            self._handle_weather(parts[2] if len(parts) >= 3 else "?", payload)
+            return
+        if parts[:2] == ["agri", "command_ack"]:
+            from . import command as command_mod
+            command_mod.handle_ack(
+                parts[2] if len(parts) >= 4 else "?",
+                parts[3] if len(parts) >= 4 else "?",
+                payload,
+            )
+            with self._lock:
+                self._acks += 1
+            return
+
+        # agri/telemetry/{plot_code}/{device_code}
+        topic_plot = parts[2] if len(parts) >= 4 else None
+        topic_device = parts[3] if len(parts) >= 4 else None
 
         device_code = str(payload.get("device_code") or topic_device or "").strip()
         if not device_code:
@@ -108,6 +137,41 @@ class MqttIngest:
         with self._lock:
             self._messages += 1
             self._alerts += len(fired)
+
+    def _handle_weather(self, plot_code: str, payload: dict) -> None:
+        """agri/weather/{plot_code} 上行落库（幂等：同 plot+ts 只留一条）。"""
+        ts = normalize_iso(payload.get("ts"))
+        data = {
+            "temperature": payload.get("temperature"),
+            "humidity": payload.get("humidity"),
+            "rainfall_mm": payload.get("rainfall_mm"),
+            "wind_dir": payload.get("wind_dir"),
+            "wind_level": payload.get("wind_level"),
+            "condition": payload.get("condition"),
+        }
+        db.insert_weather(plot_code, ts, data)
+        with self._lock:
+            self._weather += 1
+
+    def publish(self, topic: str, payload, qos: int = 0, retain: bool = False) -> bool:
+        """下行发布。未连接时返回 False，绝不抛异常（调用方据此给出降级说明）。"""
+        client = self._client
+        if client is None or not self._connected:
+            log.warning("MQTT 未连接，放弃发布 topic=%s", topic)
+            return False
+        try:
+            body = payload if isinstance(payload, (str, bytes)) else json.dumps(payload, ensure_ascii=False)
+            info = client.publish(topic, body, qos=qos, retain=retain)
+            ok = getattr(info, "rc", 1) == mqtt.MQTT_ERR_SUCCESS
+            if ok:
+                with self._lock:
+                    self._published += 1
+            else:
+                log.warning("MQTT 发布返回 rc=%s，topic=%s", getattr(info, "rc", "?"), topic)
+            return bool(ok)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("MQTT 发布失败 topic=%s: %s", topic, exc)
+            return False
 
     def _ensure_device(self, device_code: str, plot_code: str, dev_type) -> None:
         """未知设备自动登记，保证数据不丢（契约设备清单以外的设备也能接入）。"""

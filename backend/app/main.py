@@ -1,6 +1,7 @@
 """FastAPI 应用装配：lifespan（建表 + 启 MQTT）、CORS、静态托管、全部路由。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -12,9 +13,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, db, llm, schemas
+from . import command, config, db, llm, runtime_config, schemas
 from .mqtt_client import ingest
-from .routers import ai, alerts, devices, meta, telemetry
+from .routers import ai, alerts, command as command_router, config as config_router
+from .routers import devices, meta, reasoning as reasoning_router, shop, telemetry, weather as weather_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,15 +27,37 @@ log = logging.getLogger("agri")
 STARTED_AT = time.time()
 
 
+async def _command_timeout_sweeper() -> None:
+    """后台清扫：超过 COMMAND_ACK_TIMEOUT_SECONDS 仍无回执的指令标 timeout。
+
+    不新增常驻进程（V2_PLAN.md 第 0 节 2C2G 约束），只是应用内一个 asyncio 任务。
+    """
+    interval = max(1.0, min(5.0, float(config.COMMAND_ACK_TIMEOUT_SECONDS) or 5.0))
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await asyncio.to_thread(command.sweep_timeouts)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 —— 清扫失败不能拖垮服务
+            log.exception("指令超时清扫任务异常（已忽略）")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     db.purge_old_telemetry()
     log.info("SQLite 就绪: %s (WAL)", config.DB_PATH)
     ingest.start()  # 连不上 Broker 也不会抛异常，仅降级为 disconnected
+    sweeper = asyncio.create_task(_command_timeout_sweeper())
     try:
         yield
     finally:
+        sweeper.cancel()
+        try:
+            await sweeper
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
         ingest.stop()
         db.close_all()
 
@@ -58,6 +82,12 @@ app.include_router(telemetry.router)
 app.include_router(alerts.router)
 app.include_router(ai.router)
 app.include_router(meta.router)
+# ---- V2 新增路由 ----
+app.include_router(config_router.router)
+app.include_router(reasoning_router.router)
+app.include_router(command_router.router)
+app.include_router(weather_router.router)
+app.include_router(shop.router)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse, tags=["health"])
@@ -76,7 +106,8 @@ def get_health() -> schemas.HealthResponse:
         ),
         llm=schemas.HealthLlm(
             configured=llm.is_configured(),
-            base_url=config.OPENAI_BASE_URL or None,
+            # V2：base_url 来自运行时配置（runtime_config.json > 环境变量 > 内置 Mock）
+            base_url=runtime_config.effective_base_url() or None,
             degraded=not llm.is_configured(),
         ),
     )

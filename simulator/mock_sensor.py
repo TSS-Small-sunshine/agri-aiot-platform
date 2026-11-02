@@ -1,10 +1,16 @@
-"""MQTT 传感器模拟器：向 agri/telemetry/{plot_code}/{device_code} 周期发布遥测。
+"""MQTT 传感器模拟器：遥测上行 + 气象上行 + 指令下行订阅并**真的改变行为** + 回执。
 
 数据形态（"像真的"）：
 - 温度 / 湿度 / 土壤温度 / 墒情 = 日周期正弦 + 随机噪声；
 - 墒情另叠加"灌溉脉冲"（缓慢下降、偶发回升）；
 - 按 SIM_BAD_PROBABILITY 概率制造越界值，用于触发并演示告警链路；
 - 电池电压缓慢单调下降。
+
+V2 新增（V2_PLAN.md 第 5/9 节）：
+- 每 WEATHER_INTERVAL_SECONDS 向 agri/weather/{plot_code} 发布一条气象；
+- 订阅 agri/command/{plot}/{device}（QoS 1），irrigation_on / irrigation_off /
+  pesticide_dose / ventilation_on 会**真实改变后续采样数值**（见 apply_command）；
+- 执行后向 agri/command_ack/{plot}/{device} 回执（QoS 1）。
 
 断线自动重连；Broker 不可达时只打印重连提示，绝不退出。
 仅依赖 paho-mqtt + 标准库。
@@ -23,6 +29,11 @@ from datetime import datetime, timedelta
 import paho.mqtt.client as mqtt
 from paho.mqtt.client import CallbackAPIVersion
 
+try:  # 包方式导入（python -m simulator.mock_sensor）
+    from . import weather as weather_mod
+except ImportError:  # 脚本方式导入（python simulator/mock_sensor.py）
+    import weather as weather_mod
+
 # ---------------- 配置（全部走环境变量） ----------------
 MQTT_HOST = os.getenv("MQTT_HOST") or "localhost"
 MQTT_PORT = int(os.getenv("MQTT_PORT") or 1883)
@@ -30,6 +41,13 @@ SIM_INTERVAL_SECONDS = float(os.getenv("SIM_INTERVAL_SECONDS") or 5)
 SIM_BAD_PROBABILITY = float(os.getenv("SIM_BAD_PROBABILITY") or 0.12)
 SIM_DEVICES_RAW = os.getenv("SIM_DEVICES") or "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02"
 TOPIC_TEMPLATE = os.getenv("MQTT_TOPIC_TEMPLATE") or "agri/telemetry/{plot_code}/{device_code}"
+# V2：气象发布间隔与下行指令主题（与后端 config.py 同源）
+WEATHER_INTERVAL_SECONDS = float(os.getenv("WEATHER_INTERVAL_SECONDS") or 30)
+WEATHER_TOPIC_TEMPLATE = os.getenv("MQTT_WEATHER_TOPIC_TEMPLATE") or "agri/weather/{plot_code}"
+COMMAND_TOPIC = os.getenv("MQTT_COMMAND_TOPIC") or "agri/command/+/+"
+COMMAND_ACK_TEMPLATE = os.getenv("MQTT_COMMAND_ACK_TOPIC_TEMPLATE") or "agri/command_ack/{plot_code}/{device_code}"
+COMMAND_ACK_QOS = int(os.getenv("MQTT_COMMAND_QOS") or 1)
+WEATHER_ENABLED = (os.getenv("SIM_WEATHER_ENABLED") or "1").strip() not in ("0", "false", "False")
 
 # 设备清单（契约第 3 节，与后端种子数据一致）
 DEVICE_CATALOG = {
@@ -56,6 +74,9 @@ OUT_OF_RANGE = {
     "soil_moisture": [18.0, 22.5, 27.0, 30.5, 82.0, 86.5],
 }
 
+# 指令可改变行为的时长上限（分钟），防止异常 params 让设备长期跑偏
+MAX_EFFECT_MINUTES = 180.0
+
 
 def local_now() -> datetime:
     return datetime.now().astimezone()
@@ -63,6 +84,14 @@ def local_now() -> datetime:
 
 def iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat()
+
+
+def _minutes(params: dict, key: str, default: float) -> float:
+    try:
+        value = float(params.get(key))
+    except (TypeError, ValueError):
+        return default
+    return max(1.0, min(MAX_EFFECT_MINUTES, value))
 
 
 class DeviceState:
@@ -80,6 +109,10 @@ class DeviceState:
         # 灌溉状态：上次灌溉时间与灌溉剩余量
         self.irrigation_until = 0.0
         self.irrigation_rate = 0.0
+        # V2：指令造成的持续扰动窗口
+        self.pesticide_until = 0.0
+        self.ventilation_until = 0.0
+        self.last_command: dict | None = None
 
     # ---- 物理量生成 ----
     def _daily(self, amplitude: float, peak_hour: float = 14.0) -> float:
@@ -93,7 +126,7 @@ class DeviceState:
         now_ts = time.time()
         # 土壤持续失水（蒸散）
         self.drift -= 0.010 * elapsed
-        # 低于 32% 时自动触发一次灌溉脉冲
+        # 低于 -6.0 时自动触发一次灌溉脉冲（本地自主行为，与下行指令无关）
         if self.drift < -6.0 and now_ts > self.irrigation_until:
             self.irrigation_until = now_ts + random.uniform(20, 40)
             self.irrigation_rate = random.uniform(0.22, 0.42)
@@ -101,7 +134,7 @@ class DeviceState:
             self.drift += self.irrigation_rate * elapsed
         else:
             self.irrigation_rate = 0.0
-        self.drift = max(-16.0, min(14.0, self.drift))
+        self.drift = max(-16.0, min(20.0, self.drift))
         noise = random.gauss(0, 0.35)
         return self.base["soil_moisture"] + self.drift + noise
 
@@ -113,6 +146,15 @@ class DeviceState:
         humidity = self.base["humidity"] - self._daily(9.0) + random.gauss(0, 1.1)
         soil_moisture = self._soil_moisture(elapsed)
         soil_temp = self.base["soil_temp"] + self._daily(2.4, peak_hour=16.0) + random.gauss(0, 0.2)
+
+        # V2：下行指令造成的可观测扰动
+        now_ts = time.time()
+        if now_ts < self.ventilation_until:
+            temperature -= 1.8
+            humidity -= 6.0
+        if now_ts < self.pesticide_until:
+            soil_temp -= 1.5
+            humidity += 4.0
 
         self.battery = max(5.0, self.battery - random.uniform(0.0008, 0.004) * max(elapsed, 1.0))
 
@@ -129,6 +171,43 @@ class DeviceState:
             metrics[bad_metric] = round(random.choice(OUT_OF_RANGE[bad_metric]), 1)
 
         return metrics
+
+    # ---- V2：指令真正改变行为 ----
+    def apply_command(self, action: str, params: dict) -> tuple[bool, str]:
+        """执行下行指令，返回 (是否成功, 中文说明)。会真实改变后续采样。"""
+        now_ts = time.time()
+        params = params or {}
+        if action == "irrigation_on":
+            minutes = _minutes(params, "duration_min", 30.0)
+            self.irrigation_until = now_ts + minutes * 60.0
+            self.irrigation_rate = 0.85  # %/s，比本地自主脉冲强，采样上立即可见
+            self.last_command = {"action": action, "params": params, "ts": iso(local_now())}
+            return True, (
+                f"灌溉已开启：墒情回升速率 {self.irrigation_rate}%/s，"
+                f"持续 {minutes:.0f} 分钟（当前 drift={self.drift:.1f}）"
+            )
+        if action == "irrigation_off":
+            self.irrigation_until = 0.0
+            self.irrigation_rate = 0.0
+            self.last_command = {"action": action, "params": params, "ts": iso(local_now())}
+            return True, f"灌溉已关闭：停止补水（当前 drift={self.drift:.1f}）"
+        if action == "pesticide_dose":
+            dose = params.get("dose_ml", params.get("dose", 60))
+            minutes = _minutes(params, "duration_min", 45.0)
+            self.pesticide_until = now_ts + minutes * 60.0
+            self.last_command = {"action": action, "params": params, "ts": iso(local_now())}
+            return True, (
+                f"已记录一次施药：剂量 {dose}ml，后续 {minutes:.0f} 分钟内"
+                f" 土壤温度 -1.5℃、湿度 +4%（可观测扰动）"
+            )
+        if action == "ventilation_on":
+            minutes = _minutes(params, "duration_min", 20.0)
+            self.ventilation_until = now_ts + minutes * 60.0
+            self.last_command = {"action": action, "params": params, "ts": iso(local_now())}
+            return True, (
+                f"通风已开启：后续 {minutes:.0f} 分钟内 气温 -1.8℃、湿度 -6%（可观测扰动）"
+            )
+        return False, f"未知动作 {action}，模拟器未改变行为"
 
     def payload(self, elapsed: float) -> str:
         ts = iso(local_now())
@@ -147,12 +226,66 @@ class DeviceState:
 
 # ---------------- MQTT 客户端 ----------------
 _running = True
+_states: dict[str, DeviceState] = {}
 
 
 def _handle_signal(signum, frame):  # noqa: ARG001
     global _running
     _running = False
     print(f"[simulator] 收到信号 {signum}，准备退出", flush=True)
+
+
+def _on_command(client, message) -> None:
+    """收到下行指令：改变行为 + 回执。"""
+    topic = getattr(message, "topic", "")
+    parts = topic.split("/")
+    plot_code = parts[2] if len(parts) >= 4 else "?"
+    device_code = parts[3] if len(parts) >= 4 else "?"
+    try:
+        payload = json.loads(message.payload.decode("utf-8", errors="replace"))
+    except (ValueError, AttributeError):
+        print(f"[simulator] 丢弃非法指令 payload，topic={topic}", flush=True)
+        return
+    if not isinstance(payload, dict):
+        print(f"[simulator] 丢弃非对象指令 payload，topic={topic}", flush=True)
+        return
+
+    command_id = str(payload.get("command_id") or "")
+    action = str(payload.get("action") or "")
+    params = payload.get("params") or {}
+    print(
+        f"[simulator] 收到指令 {command_id} action={action} plot={plot_code} "
+        f"device={device_code} params={json.dumps(params, ensure_ascii=False)}",
+        flush=True,
+    )
+
+    state = _states.get(device_code)
+    if state is None:
+        ok, detail = False, f"本模拟器未模拟设备 {device_code}"
+    else:
+        ok, detail = state.apply_command(action, params)
+    print(f"[simulator] 指令执行结果 {command_id}: ok={ok} detail={detail}", flush=True)
+
+    ack = {
+        "command_id": command_id,
+        "status": "executed" if ok else "failed",
+        "detail": detail,
+        "ts": iso(local_now()),
+    }
+    ack_topic = COMMAND_ACK_TEMPLATE.format(plot_code=plot_code, device_code=device_code)
+    info = client.publish(ack_topic, json.dumps(ack, ensure_ascii=False), qos=COMMAND_ACK_QOS, retain=False)
+    print(
+        f"[simulator] 已回执 {command_id} status={ack['status']} topic={ack_topic} "
+        f"qos={COMMAND_ACK_QOS} rc={getattr(info, 'rc', '?')}",
+        flush=True,
+    )
+
+
+def _on_message(client, userdata, message):  # noqa: ARG001
+    try:
+        _on_command(client, message)
+    except Exception as exc:  # noqa: BLE001 —— 单条脏指令不能中断订阅
+        print(f"[simulator] 处理指令失败：{type(exc).__name__}: {exc}", flush=True)
 
 
 def build_client() -> mqtt.Client:
@@ -167,12 +300,15 @@ def build_client() -> mqtt.Client:
             print(f"[simulator] 连接被拒绝：{reason_code}", flush=True)
             return
         print(f"[simulator] 已连接 {MQTT_HOST}:{MQTT_PORT}", flush=True)
+        c.subscribe(COMMAND_TOPIC, qos=COMMAND_ACK_QOS)
+        print(f"[simulator] 已订阅下行指令 {COMMAND_TOPIC} (qos={COMMAND_ACK_QOS})", flush=True)
 
     def on_disconnect(c, userdata, flags, reason_code, properties=None):
         print(f"[simulator] 连接断开（{reason_code}），paho 将自动重连…", flush=True)
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
+    client.on_message = _on_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     return client
 
@@ -188,6 +324,7 @@ def resolve_devices() -> list[str]:
 
 
 def main() -> int:
+    global _states
     signal.signal(signal.SIGINT, _handle_signal)
     try:
         signal.signal(signal.SIGTERM, _handle_signal)
@@ -195,11 +332,21 @@ def main() -> int:
         pass
 
     device_codes = resolve_devices()
-    states = {code: DeviceState(code) for code in device_codes}
+    _states = {code: DeviceState(code) for code in device_codes}
+    states = _states
+
+    # V2：气象按地块发布（地块集合来自所选设备）
+    plots = sorted({s.plot_code for s in states.values()})
+    weather_states = {code: weather_mod.WeatherState(code) for code in plots}
 
     print(
         f"[simulator] 目标 {MQTT_HOST}:{MQTT_PORT}，间隔 {SIM_INTERVAL_SECONDS}s，"
         f"设备 {device_codes}，越界概率 {SIM_BAD_PROBABILITY}",
+        flush=True,
+    )
+    print(
+        f"[simulator] 气象发布 {'开启' if WEATHER_ENABLED else '关闭'}，间隔 {WEATHER_INTERVAL_SECONDS}s，"
+        f"地块 {plots}，主题 {WEATHER_TOPIC_TEMPLATE}",
         flush=True,
     )
 
@@ -212,6 +359,7 @@ def main() -> int:
         print(f"[simulator] 启动异常（仍将继续重试）：{type(exc).__name__}: {exc}", flush=True)
 
     last = time.time()
+    last_weather = 0.0
     warned = False
     tick = 0
     try:
@@ -228,6 +376,20 @@ def main() -> int:
                 if tick % 12 == 1:
                     print(
                         f"[simulator] 已发布 {tick} 轮，最新 ts={iso(local_now())}",
+                        flush=True,
+                    )
+
+                # V2：气象按自己的节奏发布（默认 30s）
+                if WEATHER_ENABLED and now - last_weather >= WEATHER_INTERVAL_SECONDS:
+                    last_weather = now
+                    for plot_code, wstate in weather_states.items():
+                        client.publish(
+                            wstate.topic(), wstate.payload(max(WEATHER_INTERVAL_SECONDS, 1.0)),
+                            qos=0, retain=False,
+                        )
+                    print(
+                        f"[simulator] 已发布气象 {len(weather_states)} 条（地块 {plots}）"
+                        f" ts={iso(local_now())}",
                         flush=True,
                     )
             elif not warned:

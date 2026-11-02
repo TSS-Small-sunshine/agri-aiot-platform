@@ -38,9 +38,21 @@ SIM_INTERVAL_SECONDS=5
 SIM_DEVICES=FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02
 SIM_BAD_PROBABILITY=0.12
 ALERT_COOLDOWN_SECONDS=300
+RUNTIME_CONFIG_PATH=/data/runtime_config.json
+REASONING_TIMEOUT_SECONDS=45
+COMMAND_ACK_TIMEOUT_SECONDS=30
+WEATHER_INTERVAL_SECONDS=30
 ```
 
 > 契约修订 v1.1：新增 `SIM_BAD_PROBABILITY`（模拟器越界注入概率，设 0 可关闭）与 `ALERT_COOLDOWN_SECONDS`（同 device_code+metric+level 的告警冷却秒数，防 5s 高频刷表）。
+>
+> 契约修订 v1.2（V2.0，共 25 个变量）：
+> - `RUNTIME_CONFIG_PATH`：WebUI 配置中心落盘路径，默认 `{DATA_DIR}/runtime_config.json`。该文件保存用户在大屏齿轮弹窗里填写的 base_url / api_key / model，**优先级高于环境变量**，且不得入库（.gitignore 必须显式覆盖）。
+> - `REASONING_TIMEOUT_SECONDS`：单次推演调用大模型的超时秒数，默认 45（比 `OPENAI_TIMEOUT_SECONDS` 宽，推演 prompt 更长）。
+> - `COMMAND_ACK_TIMEOUT_SECONDS`：指令下发后等待模拟器回执的秒数，超时把命令标记为 `timeout`，默认 30。
+> - `WEATHER_INTERVAL_SECONDS`：模拟器上报气象数据的间隔秒数，默认 30（与 5s 遥测解耦）。
+>
+> 配置优先级（三者取第一个有值的）：`runtime_config.json` > 环境变量 > 内置 Mock。无任何 Key 时 AI 与推演均降级为本地规则库，HTTP 仍 200。
 
 ## 3. MQTT 约定
 - 主题：`agri/telemetry/{plot_code}/{device_code}`（如 `agri/telemetry/A/FJ-CITRUS-A01`）
@@ -160,3 +172,24 @@ items 按 created_at 降序。
 - mosquitto 容器 1883（仅内网，不映射到宿主机）
 - 前端由后端同端口托管，无独立容器
 - compose 服务名固定：`backend`、`mosquitto`、`simulator`；数据卷 `agri-data` 挂载到 `/data`
+
+## 9. V2.0 契约修订记录（调度方裁定）
+
+> V2.0 施工图见 `docs/V2_PLAN.md`。本节记录第一步后端交付后由调度方裁定的 5 个契约缺口。
+
+### 9.1 湿度阈值静默带（已修，v1.1 起生效）
+原 `humidity` 只有 30~40 / 85~95 两段无定义 → 改为对称双档：正常 40~85；<40 或 >85 → warning；<30 或 >95 → critical。已落到 `backend/app/config.py` 的 `THRESHOLDS` 与 `/api/meta`。
+
+### 9.2 新增环境变量（v1.2）
+`RUNTIME_CONFIG_PATH` / `REASONING_TIMEOUT_SECONDS` / `COMMAND_ACK_TIMEOUT_SECONDS` / `WEATHER_INTERVAL_SECONDS` 共 4 个，见第 2 节。
+
+### 9.3 响应体新增字段（裁定：接受，均为增量）
+- `POST /api/command/execute` → 增 `published`(bool)、`detail`(string)
+- `POST /api/reasoning/simulate` → 增 `corrected`(bool)、`prior`(object)
+- 二者均**只增不改**，V1 既有字段逐字未动。
+
+### 9.4 `/api/meta` 的"扩展"（裁定：接受）
+AC8 要求 V1 接口逐字段不变，但 `/api/meta` 被 V2_PLAN §6 明确列为"扩展"接口 → 该接口按**超集**验收：V1 字段（`plots[].plot_code/plot_name/devices`、`thresholds`、`sim_interval_seconds`）逐字保留，另增 `plots[].{name,crop,area_mu,stage,col,row}`、`crops`、`weather`。其余 10 个 V1 接口仍是严格逐字不变。
+
+### 9.5 偏差校正同时改 `power_kwh`（裁定：接受）
+大模型给出的 `yield_loss_pct` 与农学先验偏差 > `REASONING_PRIOR_TOLERANCE_PCT`(15) 时，后端**同时**把 `power_kwh` 也换成先验值，避免同一棵树里两个数字出自不同模型而自相矛盾。响应体 `corrected=true` 且白盒第 3 步写明校正原因。

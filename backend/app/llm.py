@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from . import config
+from . import config, runtime_config
 
 MOCK_MODEL_ID = "mock-agronomist"
 MOCK_MODEL_LABEL = "Mock 农技专家（离线演示）"
@@ -25,11 +25,17 @@ MOCK_MODELS = [
 
 
 def default_model() -> str:
-    return config.OPENAI_MODEL or MOCK_MODEL_ID
+    """运行时配置优先（runtime_config.json > 环境变量 > Mock，V2_PLAN.md 第 4 节）。"""
+    return runtime_config.default_model()
 
 
 def is_configured() -> bool:
-    return bool(config.OPENAI_BASE_URL and config.OPENAI_API_KEY)
+    return runtime_config.is_configured()
+
+
+def effective_base_url() -> str:
+    """当前生效 base_url（可能来自 runtime_config.json 或环境变量）。"""
+    return runtime_config.effective_base_url()
 
 
 # ---------------- Mock 农技专家知识库 ----------------
@@ -170,20 +176,22 @@ class ChatResult:
 
 
 def _headers() -> dict:
+    # 每次都从运行时配置取（无进程内缓存），保证 WebUI 改配置后立刻生效。
     return {
-        "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+        "Authorization": f"Bearer {runtime_config.effective_api_key()}",
         "Content-Type": "application/json",
     }
 
 
 async def discover_models() -> tuple[list[dict], str | None, bool]:
     """返回 (items, error, degraded)。无 Key 或发现失败 → mock 列表 + 原因。"""
-    if not config.OPENAI_BASE_URL:
+    base_url = runtime_config.effective_base_url()
+    if not base_url:
         return list(MOCK_MODELS), "OPENAI_BASE_URL 未配置，已回落 Mock 模型列表", True
-    if not config.OPENAI_API_KEY:
+    if not runtime_config.effective_api_key():
         return list(MOCK_MODELS), "OPENAI_API_KEY 未配置，已回落 Mock 模型列表", True
 
-    url = f"{config.OPENAI_BASE_URL}/models"
+    url = f"{base_url}/models"
     try:
         async with httpx.AsyncClient(timeout=config.OPENAI_TIMEOUT_SECONDS) as client:
             resp = await client.get(url, headers=_headers())
@@ -214,14 +222,15 @@ async def chat(question: str, model: str | None) -> ChatResult:
     def elapsed() -> int:
         return int((time.perf_counter() - started) * 1000)
 
-    if not config.OPENAI_BASE_URL or not config.OPENAI_API_KEY:
+    base_url = runtime_config.effective_base_url()
+    if not base_url or not runtime_config.effective_api_key():
         reason = "OPENAI_BASE_URL/OPENAI_API_KEY 未配置，已降级为 Mock 农技专家"
         return ChatResult(
             answer=mock_answer(question), model=MOCK_MODEL_ID, degraded=True,
             latency_ms=elapsed(), error=reason,
         )
 
-    url = f"{config.OPENAI_BASE_URL}/chat/completions"
+    url = f"{base_url}/chat/completions"
     body = {
         "model": chosen,
         "messages": [
@@ -263,4 +272,71 @@ async def chat(question: str, model: str | None) -> ChatResult:
     return ChatResult(
         answer=mock_answer(question), model=MOCK_MODEL_ID, degraded=True,
         latency_ms=elapsed(), error=reason,
+    )
+
+# ---------------- 结构化 JSON 调用（V2 推演专用，V2_PLAN.md §8.3） ----------------
+async def complete_json(system_prompt: str, user_prompt: str, model: str | None = None,
+                        timeout_seconds: float | None = None) -> ChatResult:
+    """推演用结构化调用：response_format={"type":"json_object"}、temperature=0.3。
+
+    与 chat() 同样的铁律：任何超时/非 JSON/HTTP 错误都不冒泡，
+    只把 error 写进 ChatResult，由调用方决定降级（reasoning.py 走 knowledge.py 规则引擎）。
+    """
+    started = time.perf_counter()
+
+    def elapsed() -> int:
+        return int((time.perf_counter() - started) * 1000)
+
+    chosen = model or default_model()
+    base_url = runtime_config.effective_base_url()
+    api_key = runtime_config.effective_api_key()
+    if not base_url or not api_key:
+        return ChatResult(
+            answer="", model=chosen, degraded=True, latency_ms=elapsed(),
+            error="大模型未配置（无 base_url 或 api_key）",
+        )
+
+    url = f"{base_url}/chat/completions"
+    body = {
+        "model": chosen,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.3,
+        "response_format": {"type": "json_object"},
+    }
+    timeout = float(timeout_seconds or config.REASONING_TIMEOUT_SECONDS)
+    attempts = max(1, config.OPENAI_MAX_RETRIES + 1)
+    last_error: str | None = None
+
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=_headers(), json=body)
+                resp.raise_for_status()
+                payload = resp.json()
+            choices = payload.get("choices") or []
+            if not choices:
+                raise ValueError("响应缺少 choices")
+            content = (choices[0].get("message") or {}).get("content")
+            if not content:
+                raise ValueError("响应缺少 message.content")
+            usage = payload.get("usage") or {}
+            return ChatResult(
+                answer=content,
+                model=payload.get("model") or chosen,
+                degraded=False,
+                latency_ms=elapsed(),
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+            )
+        except Exception as exc:  # noqa: BLE001 —— 绝不冒泡
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < attempts - 1:
+                continue
+
+    return ChatResult(
+        answer="", model=chosen, degraded=True, latency_ms=elapsed(),
+        error=f"大模型调用失败（已重试 {attempts - 1} 次）：{last_error}",
     )

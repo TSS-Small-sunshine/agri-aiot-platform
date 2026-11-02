@@ -39,6 +39,58 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
 """
 
+# V2.0 新增 4 表（docs/V2_PLAN.md 第 3 节 DDL 原文），幂等建表。
+DDL_V2 = """
+CREATE TABLE IF NOT EXISTS reasoning (
+  id          TEXT PRIMARY KEY,
+  plot_code   TEXT NOT NULL,
+  trigger     TEXT,
+  prompt      TEXT NOT NULL,
+  result      TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  model       TEXT,
+  latency_ms  INTEGER,
+  error       TEXT,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reasoning_created ON reasoning(created_at DESC);
+CREATE TABLE IF NOT EXISTS commands (
+  id           TEXT PRIMARY KEY,
+  reasoning_id TEXT,
+  plot_code    TEXT NOT NULL,
+  device_code  TEXT NOT NULL,
+  node_id      TEXT,
+  action       TEXT NOT NULL,
+  params       TEXT,
+  topic        TEXT NOT NULL,
+  payload      TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  ack_at       TEXT,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_commands_created ON commands(created_at DESC);
+CREATE TABLE IF NOT EXISTS weather (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  plot_code    TEXT NOT NULL,
+  ts           TEXT NOT NULL,
+  temperature  REAL, humidity REAL, rainfall_mm REAL,
+  wind_dir     TEXT, wind_level INTEGER, condition TEXT,
+  UNIQUE(plot_code, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_weather_plot_ts ON weather(plot_code, ts DESC);
+CREATE TABLE IF NOT EXISTS skus (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  category    TEXT,
+  price       REAL,
+  unit        TEXT,
+  image       TEXT,
+  stock       INTEGER,
+  description TEXT,
+  keywords    TEXT
+);
+"""
+
 _write_lock = threading.RLock()
 _write_conn: sqlite3.Connection | None = None
 _local = threading.local()
@@ -127,8 +179,10 @@ def init_db() -> None:
     with _write_lock:
         conn = write_conn()
         conn.executescript(DDL)
+        conn.executescript(DDL_V2)
         conn.commit()
     seed_devices()
+    seed_skus()
 
 
 def seed_devices() -> None:
@@ -147,6 +201,23 @@ def seed_devices() -> None:
            ON CONFLICT(device_code) DO UPDATE SET
              name=excluded.name, plot_code=excluded.plot_code, plot_name=excluded.plot_name,
              type=excluded.type, location=excluded.location""",
+        rows,
+    )
+
+
+def seed_skus() -> None:
+    """幂等写入 6 条农资 SKU（V2_PLAN.md 第 3 节）。INSERT OR IGNORE：绝不覆盖用户改动。"""
+    rows = [
+        (
+            s["id"], s["name"], s["category"], s["price"], s["unit"],
+            s["image"], s["stock"], s["description"], s["keywords"],
+        )
+        for s in config.SKUS
+    ]
+    executemany(
+        """INSERT OR IGNORE INTO skus
+           (id, name, category, price, unit, image, stock, description, keywords)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
 
@@ -188,6 +259,149 @@ def purge_old_telemetry() -> int:
     """按 TELEMETRY_RETENTION_DAYS 清理过期遥测（契约第 2 节的保留期参数）。"""
     from .timeutil import cutoff_iso
     return execute("DELETE FROM telemetry WHERE ts < ?", (cutoff_iso(config.TELEMETRY_RETENTION_DAYS * 24),))
+
+
+
+
+# ---------------- V2：推演 ----------------
+def insert_reasoning(row: dict) -> None:
+    execute(
+        """INSERT OR REPLACE INTO reasoning
+           (id, plot_code, trigger, prompt, result, source, model, latency_ms, error, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row["id"], row["plot_code"], row.get("trigger"), row["prompt"], row["result"],
+            row["source"], row.get("model"), row.get("latency_ms"), row.get("error"),
+            row["created_at"],
+        ),
+    )
+
+
+def get_reasoning(reasoning_id: str) -> dict | None:
+    return query_one("SELECT * FROM reasoning WHERE id = ?", (reasoning_id,))
+
+
+def list_reasoning(limit: int) -> list[dict]:
+    """轻量摘要（不含 prompt/result）。reasoning.history() 另取 result 回填数字字段。"""
+    return query(
+        """SELECT id, plot_code, trigger, source, model, latency_ms, error, created_at
+           FROM reasoning ORDER BY created_at DESC, id DESC LIMIT ?""",
+        (limit,),
+    )
+
+
+def count_reasoning() -> int:
+    row = query_one("SELECT COUNT(*) AS c FROM reasoning")
+    return int(row["c"]) if row else 0
+
+
+# ---------------- V2：指令 ----------------
+def insert_command(row: dict) -> None:
+    execute(
+        """INSERT INTO commands
+           (id, reasoning_id, plot_code, device_code, node_id, action, params, topic, payload,
+            status, ack_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row["id"], row.get("reasoning_id"), row["plot_code"], row["device_code"],
+            row.get("node_id"), row["action"], row.get("params"), row["topic"], row["payload"],
+            row["status"], row.get("ack_at"), row["created_at"],
+        ),
+    )
+
+
+def get_command(command_id: str) -> dict | None:
+    return query_one("SELECT * FROM commands WHERE id = ?", (command_id,))
+
+
+def list_commands(limit: int) -> list[dict]:
+    return query(
+        "SELECT * FROM commands ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+    )
+
+
+def count_commands() -> int:
+    row = query_one("SELECT COUNT(*) AS c FROM commands")
+    return int(row["c"]) if row else 0
+
+
+def mark_command_executed(command_id: str, ack_at: str) -> int:
+    """回执到达：仅当仍是 dispatched 才流转，避免乱序回执覆盖终态。"""
+    return execute(
+        "UPDATE commands SET status = 'executed', ack_at = ? WHERE id = ? AND status = 'dispatched'",
+        (ack_at, command_id),
+    )
+
+
+def mark_command_failed(command_id: str, ack_at: str) -> int:
+    return execute(
+        "UPDATE commands SET status = 'failed', ack_at = ? WHERE id = ? AND status = 'dispatched'",
+        (ack_at, command_id),
+    )
+
+
+def expire_commands(cutoff: str) -> int:
+    """把超过 COMMAND_ACK_TIMEOUT_SECONDS 仍无回执的指令标为 timeout。"""
+    return execute(
+        "UPDATE commands SET status = 'timeout' WHERE status = 'dispatched' AND created_at < ?",
+        (cutoff,),
+    )
+
+
+# ---------------- V2：气象 ----------------
+def insert_weather(plot_code: str, ts: str, data: dict) -> int:
+    return insert(
+        """INSERT OR REPLACE INTO weather
+           (plot_code, ts, temperature, humidity, rainfall_mm, wind_dir, wind_level, condition)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            plot_code, ts, data.get("temperature"), data.get("humidity"),
+            data.get("rainfall_mm"), data.get("wind_dir"), data.get("wind_level"),
+            data.get("condition"),
+        ),
+    )
+
+
+def latest_weather(plot_code: str) -> dict | None:
+    return query_one(
+        """SELECT plot_code, ts, temperature, humidity, rainfall_mm, wind_dir, wind_level, condition
+           FROM weather WHERE plot_code = ? ORDER BY ts DESC, id DESC LIMIT 1""",
+        (plot_code,),
+    )
+
+
+def list_weather(plot_code: str, limit: int) -> list[dict]:
+    return query(
+        """SELECT ts, temperature, humidity, rainfall_mm, wind_dir, wind_level, condition
+           FROM weather WHERE plot_code = ? ORDER BY ts DESC, id DESC LIMIT ?""",
+        (plot_code, limit),
+    )
+
+
+def latest_weather_all() -> list[dict]:
+    return query(
+        """SELECT w.plot_code, w.ts, w.temperature, w.humidity, w.rainfall_mm,
+                  w.wind_dir, w.wind_level, w.condition
+           FROM weather w
+           JOIN (SELECT plot_code, MAX(ts) AS mts FROM weather GROUP BY plot_code) m
+             ON m.plot_code = w.plot_code AND m.mts = w.ts
+           GROUP BY w.plot_code
+           ORDER BY w.plot_code"""
+    )
+
+
+# ---------------- V2：商城 ----------------
+def list_skus(keyword: str | None = None) -> list[dict]:
+    """按 keywords/name/description 模糊匹配（V2_PLAN.md 第 6 节）。"""
+    if keyword:
+        like = f"%{keyword.strip()}%"
+        return query(
+            """SELECT * FROM skus
+               WHERE keywords LIKE ? OR name LIKE ? OR description LIKE ? OR category LIKE ?
+               ORDER BY id""",
+            (like, like, like, like),
+        )
+    return query("SELECT * FROM skus ORDER BY id")
 
 
 def db_ok() -> bool:
