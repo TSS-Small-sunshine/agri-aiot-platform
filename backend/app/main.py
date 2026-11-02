@@ -9,9 +9,10 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
 
 from . import command, config, db, llm, runtime_config, schemas
 from .mqtt_client import ingest
@@ -114,25 +115,75 @@ def get_health() -> schemas.HealthResponse:
 
 
 # ---- 静态资源与 SPA 回退 ----
+# 资源类请求的扩展名集合：这类路径未命中时必须真 404（JSON），
+# 绝不能回退 index.html —— 否则浏览器会拿到 content-type: text/html 的
+# module script，按 HTML 规范因 MIME 不符拒绝执行，整页白屏。
+_ASSET_EXTENSIONS = frozenset({
+    ".js", ".mjs", ".cjs", ".css", ".map", ".json",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".mp4", ".webm", ".wasm",
+})
+
+
+def _is_asset_request(normalized: str) -> bool:
+    """归一化后的路径是否属于"静态资源请求"（而非页面导航）。
+
+    frontend/vite.config.js 的 base: './' 使 index.html 用相对路径引用产物，
+    所以未知深链 /nope/deep 会让浏览器去请求 /nope/assets/index-*.js ——
+    这类请求必须 404 而不是回退页面。
+    """
+    if normalized.startswith("assets/"):
+        return True
+    return Path(normalized).suffix.lower() in _ASSET_EXTENSIONS
+
+
 class SPAStaticFiles(StaticFiles):
-    """静态资源优先；未命中的前端路由回退 index.html。
+    """静态资源优先；未命中的**页面导航**回退 index.html。
 
     注意：starlette 1.x 的 self.directory 是 str（os.fspath 后的结果），
     必须用 os.path.join 拼路径，不能直接用 / 运算符。
     /api/** 的未命中不做 SPA 回退，保持 FastAPI 标准 404 响应体。
+    资源类请求（/assets/** 或带资源扩展名）同样不回退，返回真 404。
     """
 
     async def get_response(self, path: str, scope):
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            # path 已过 os.path.normpath，Windows 下分隔符会变成 "\\"，先归一化再判断前缀。
+            # path 已过 os.path.normpath，Windows 下分隔符会变成 "\\"，先归一化再判断。
             normalized = path.replace("\\", "/")
-            if exc.status_code == 404 and not normalized.startswith("api/"):
+            if exc.status_code == 404:
+                if normalized.startswith("api/"):
+                    raise
+                if _is_asset_request(normalized):
+                    # 资源类请求：以非 text/html 的真 404 结束，让浏览器按资源失败处理。
+                    raise
                 index_path = Path(self.directory) / "index.html"
                 if index_path.is_file():
-                    return FileResponse(index_path)
+                    return self._navigation_response(index_path, scope)
             raise
+
+    def _navigation_response(self, index_path: Path, scope) -> Response:
+        """回退 index.html，并为多段深链注入 <base>。
+
+        index.html 用 './assets/**' 相对路径（vite base: './'，不得改动）。
+        在 /nope/deep 这类多段深链下，浏览器会把 './assets/x' 解析成
+        '/nope/assets/x'，产物取不到 → 模块脚本不执行 → 整页白屏。
+        注入 <base href="{应用根}/"> 后，相对路径重新解析到 /assets/**。
+        仅在回退路径上注入（真实存在的 '/' 仍由 StaticFiles 原样返回），
+        且不修改磁盘上的 frontend/dist/index.html。
+        """
+        base = scope.get("root_path") or "/"
+        if not base.endswith("/"):
+            base += "/"
+        try:
+            html = index_path.read_text(encoding="utf-8")
+        except OSError:
+            return FileResponse(index_path)
+        if "<base " not in html:
+            html = html.replace("<head>", f'<head>\n    <base href="{base}">', 1)
+        return HTMLResponse(html)
 
 
 INDEX_HTML = config.STATIC_DIR / "index.html"
