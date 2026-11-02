@@ -171,38 +171,52 @@ agri-aiot-platform/
 │       └── build-push.yml        # CI：构建 backend + simulator 镜像推送到 ghcr.io
 ├── backend/                      # 【后端】FastAPI 服务
 │   ├── app/
+│   │   ├── __init__.py           # 包标记（空）
 │   │   ├── main.py               # 应用入口：路由注册 + StaticFiles + SPA 回退
 │   │   ├── config.py             # 全部配置从环境变量读，含告警阈值常量
 │   │   ├── db.py                 # SQLite 连接、WAL、幂等建表
-│   │   ├── mqtt_client.py        # MQTT 订阅与消息落库
-│   │   ├── ai.py                 # 大模型调用：超时 / 重试 / Mock 降级 / latency 埋点
-│   │   ├── routers/              # 各业务路由
+│   │   ├── schemas.py            # Pydantic 响应模型（字段与契约第 5 节逐字段一致）
+│   │   ├── timeutil.py           # 时间助手：全系统统一 ISO8601 带时区
+│   │   ├── alerts.py             # 阈值规则引擎（契约第 6 节 + 告警冷却去重）
+│   │   ├── mqtt_client.py        # MQTT 订阅、消息落库，并触发告警评估
+│   │   ├── llm.py                # 大模型调用：超时 / 重试 / Mock 降级 / latency 埋点
+│   │   ├── routers/              # 各业务路由：__init__.py / ai.py / alerts.py
+                                  # devices.py / meta.py / telemetry.py
 │   │   └── static/               # 前端构建产物落点（gitignore，由脚本或镜像填入）
-│   ├── requirements.txt
+│   ├── requirements.txt          # fastapi / uvicorn / paho-mqtt / httpx / pydantic
 │   └── Dockerfile                # 多阶段：node 构建前端 → python 运行
 ├── frontend/                     # 【前端】Vue3 + Vite
 │   ├── src/
-│   │   ├── components/           # RealtimeChart / DeviceStatusCard / SoilGauge
-│   │   │                         # AlertPanel / PlotMap / AiChat
-│   │   └── main.js
+│   │   ├── main.js               # 入口：挂载 App、引入全局主题样式
+│   │   ├── App.vue               # 根组件：5s 轮询 + 顶部错误条 + 整体布局
+│   │   ├── api.js                # 接口封装：统一超时 + ApiError（保留状态码与 detail）
+│   │   ├── config.js             # 前端可调参数（VITE_*，带安全默认值）
+│   │   ├── echarts.js            # ECharts 按需引入，只注册用到的图表与组件
+│   │   ├── styles/
+│   │   │   └── theme.css         # 深色科技感主题：颜色/间距全部走 CSS 变量
+│   │   └── components/           # RealtimeChart.vue / DeviceStatusCard.vue
+                                  # SoilGauge.vue / AlertPanel.vue / PlotMap.vue / AiChat.vue
+│   ├── index.html                # Vite 入口 HTML
 │   ├── vite.config.js            # build.outDir = dist；dev 代理 /api → 127.0.0.1:8000
-│   └── package.json
+│   ├── package.json
+│   └── package-lock.json         # 锁定依赖版本，保证构建可复现
 ├── simulator/
 │   ├── mock_sensor.py            # MQTT 模拟器：4 台设备定时上报
+│   ├── requirements.txt          # 模拟器依赖（仅 paho-mqtt）
 │   └── Dockerfile
 ├── mosquitto/
-│   └── mosquitto.conf            # broker 配置（仅内网，禁匿名可开）
+│   └── mosquitto.conf            # broker 配置（仅内网，不映射宿主机端口）
 ├── scripts/
 │   ├── dev_up.sh                 # 裸机一键启动（Ubuntu / macOS）
 │   ├── dev_up.ps1                # 裸机一键启动（Windows）
 │   └── seed_history.py           # 灌历史数据，让演示现场立刻有曲线
 ├── docs/
 │   ├── CONTRACT.md               # 接口契约（冻结版，唯一真相）
-│   ├── ARCHITECTURE.md
-│   ├── PLAN.md
+│   ├── ARCHITECTURE.md           # 目录结构 + 数据库设计（表/索引/阈值/MQTT/接口清单）
 │   └── API.md                    # 接口文档（方法/参数/示例请求/示例响应）
 ├── docker-compose.yml            # 默认：拉 ghcr 预构建镜像
 ├── docker-compose.build.yml      # 可选：本地构建覆盖文件
+├── .dockerignore                 # 构建上下文排除（.venv / node_modules / dist / data / .env …）
 ├── .env.example                  # 全部 21 个环境变量 + 中文注释
 ├── .gitignore
 ├── README.md                     # 本文件
@@ -1072,8 +1086,7 @@ curl -s -X POST http://127.0.0.1:8000/api/ai/chat \
 
 - **[docs/CONTRACT.md](docs/CONTRACT.md)** —— 接口契约（冻结版，唯一真相）
 - **[docs/API.md](docs/API.md)** —— 接口文档（方法 / 参数 / 示例请求 / 示例响应）
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** —— 架构设计说明
-- **[docs/PLAN.md](docs/PLAN.md)** —— 项目计划
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** —— 目录结构与数据库设计（4 张表 DDL、索引、阈值规则、MQTT 约定、接口清单）
 - **[CHANGELOG.md](CHANGELOG.md)** —— 更新日志 + **技术难点与解决思路（演讲稿素材）**
 
 ## 环境变量
