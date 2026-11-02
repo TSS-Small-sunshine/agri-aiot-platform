@@ -3,9 +3,15 @@ const env = import.meta.env || {}
 
 export const POLL_INTERVAL_MS = Number(env.VITE_POLL_INTERVAL_MS || 5000)
 export const API_TIMEOUT_MS = Number(env.VITE_API_TIMEOUT_MS || 5000)
+// 推演比对话慢（后端 REASONING_TIMEOUT_SECONDS=45），前端超时必须更宽，否则会被自己 abort
+export const REASONING_TIMEOUT_MS = Number(env.VITE_REASONING_TIMEOUT_MS || 60000)
 export const CHART_WINDOW_POINTS = Number(env.VITE_CHART_WINDOW_POINTS || 60)
 export const HISTORY_HOURS = Number(env.VITE_HISTORY_HOURS || 1)
 export const ALERT_LIMIT = Number(env.VITE_ALERT_LIMIT || 20)
 export const AI_HISTORY_LIMIT = Number(env.VITE_AI_HISTORY_LIMIT || 20)
 export const SUMMARY_HOURS = Number(env.VITE_SUMMARY_HOURS || 24)
+export const COMMAND_HISTORY_LIMIT = Number(env.VITE_COMMAND_HISTORY_LIMIT || 20)
+export const REASONING_HISTORY_LIMIT = Number(env.VITE_REASONING_HISTORY_LIMIT || 20)
 
+// 手写路由表（V2_PLAN.md 第 10 节：3 条路由，不引 vue-router）
+export const ROUTES = ['/', '/legacy', '/mobile']

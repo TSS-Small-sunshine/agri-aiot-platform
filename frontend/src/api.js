@@ -1,4 +1,4 @@
-import { API_TIMEOUT_MS } from './config'
+import { API_TIMEOUT_MS, REASONING_TIMEOUT_MS } from './config'
 
 const BASE = import.meta.env?.VITE_API_BASE || '/api'
 
@@ -57,6 +57,7 @@ const qs = (params) => {
   return s ? `?${s}` : ''
 }
 
+// ---------------- V1 接口（契约冻结，逐字段不得改）----------------
 export const getHealth = () => request('/health')
 
 export const getDevices = () => request('/devices')
@@ -84,3 +85,42 @@ export const aiChat = (question, sessionId, model) =>
 export const getAiHistory = (limit) => request(`/ai/history${qs({ limit })}`)
 
 export const getMeta = () => request('/meta')
+
+// ---------------- V2 新增接口（V2_PLAN.md 第 6 节 12 条）----------------
+// 配置中心：GET 只回显掩码，PUT 热生效，POST /test 探活
+export const getConfig = () => request('/config')
+
+/**
+ * 保存运行时配置。
+ * api_key 语义（V2_PLAN.md 第 6 节）：键缺省=保持不变、空串=保持不变、null=清除。
+ * 这里显式三态传递，绝不把掩码回写上去（掩码不是真 Key）。
+ */
+export const putConfig = (payload) =>
+  request('/config', { method: 'PUT', body: payload, timeoutMs: REASONING_TIMEOUT_MS })
+
+export const testConfig = () =>
+  request('/config/test', { method: 'POST', timeoutMs: REASONING_TIMEOUT_MS })
+
+export const getModels = () => request('/models')
+
+// 推演：比对话慢，走独立超时
+export const reasoningSimulate = (plotCode, nodeId) =>
+  request('/reasoning/simulate', {
+    method: 'POST',
+    body: { plot_code: plotCode, node_id: nodeId ?? null },
+    timeoutMs: REASONING_TIMEOUT_MS
+  })
+
+export const getReasoningHistory = (limit) => request(`/reasoning/history${qs({ limit })}`)
+
+export const getReasoningDetail = (id) => request(`/reasoning/${encodeURIComponent(id)}`)
+
+// 指令闭环
+export const executeCommand = (payload) => request('/command/execute', { method: 'POST', body: payload })
+
+export const getCommandHistory = (limit) => request(`/command/history${qs({ limit })}`)
+
+// 气象与商城
+export const getWeatherLatest = (plotCode) => request(`/weather/latest${qs({ plot_code: plotCode })}`)
+
+export const getSkus = (keyword) => request(`/shop/skus${qs({ keyword })}`)

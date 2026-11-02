@@ -11,6 +11,8 @@
 
     <p v-if="error" class="err-inline">{{ error }}</p>
     <p v-if="modelsError" class="err-inline">{{ modelsError }}</p>
+    <!-- 后端明确告知「已降级为 Mock 列表」是正常降级态而非请求失败：用提示色，不要伪装成报错 -->
+    <p v-else-if="modelsNotice" class="notice-inline">{{ modelsNotice }}</p>
 
     <div class="body">
       <div class="main">
@@ -34,10 +36,17 @@
           <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
             <div class="bubble">
               <div class="meta mono" v-if="m.role === 'assistant'">
+                <span class="src-tag" :class="m.tag.kind">{{ m.tag.text }}</span>
                 {{ m.model }} · {{ m.latency_ms }}ms
-                <span v-if="m.degraded" class="degraded-tag">降级</span>
               </div>
               <div class="text">{{ m.text }}</div>
+              <!-- 推演类回答在气泡下方挂白盒折叠面板 -->
+              <ReasoningWhitebox v-if="m.whitebox && m.whitebox.length" :steps="m.whitebox" />
+              <p v-if="m.commands && Object.keys(m.commands).length" class="cmd-line mono">
+                <template v-for="(c, nid) in m.commands" :key="nid">
+                  <span class="cmd-node">{{ nid }}</span> 指令 {{ c.command_id }} · {{ c.status }}
+                </template>
+              </p>
             </div>
           </div>
           <div v-if="sending" class="msg assistant">
@@ -85,8 +94,10 @@
 
 <script setup>
 import { nextTick, onMounted, ref } from 'vue'
+import ReasoningWhitebox from './ReasoningWhitebox.vue'
 import { aiChat, getAiHistory, getAiModels } from '../api'
 import { AI_HISTORY_LIMIT } from '../config'
+import { chatTag, sourceTag } from '../sourceLabel'
 
 const emit = defineEmits(['error'])
 
@@ -102,6 +113,7 @@ const loading = ref(false)
 const sending = ref(false)
 const error = ref('')
 const modelsError = ref('')
+const modelsNotice = ref('')
 const history = ref([])
 const historyLoading = ref(false)
 const historyError = ref('')
@@ -120,7 +132,8 @@ async function loadModels() {
     models.value = Array.isArray(res?.items) ? res.items : []
     configured.value = !!res?.configured
     degraded.value = !!res?.degraded
-    modelsError.value = res?.error ? `模型发现失败，已回落到 Mock 列表：${res.error}` : ''
+    modelsError.value = ''
+    modelsNotice.value = res?.error ? `已降级为 Mock 模型列表：${res.error}` : ''
     if (!model.value || !models.value.some((m) => m.id === model.value)) {
       model.value = res?.default_model || models.value[0]?.id || ''
     }
@@ -150,7 +163,8 @@ function replay(h) {
     text: h.answer || '（无回答）',
     model: h.model,
     latency_ms: h.latency_ms,
-    degraded: !!h.degraded
+    degraded: !!h.degraded,
+    tag: chatTag(h)
   })
   scrollToEnd()
 }
@@ -176,20 +190,58 @@ async function send() {
       text: res?.answer || '（空回答）',
       model: res?.model || 'unknown',
       latency_ms: res?.latency_ms ?? 0,
-      degraded: !!res?.degraded
+      degraded: !!res?.degraded,
+      tag: chatTag(res)
     })
     if (res?.degraded) degraded.value = true
     if (res?.error) report(`AI 服务降级：${res.error}`)
     loadHistory()
   } catch (err) {
     report(`AI 对话请求失败：${err.message}`)
-    messages.value.push({ role: 'assistant', text: `请求失败：${err.message}`, model: '-', latency_ms: 0, degraded: true })
+    messages.value.push({
+      role: 'assistant',
+      text: `请求失败：${err.message}`,
+      model: '-',
+      latency_ms: 0,
+      degraded: true,
+      tag: { text: '离线降级策略', kind: 'red', key: 'fallback' }
+    })
   } finally {
     loading.value = false
     sending.value = false
     scrollToEnd()
   }
 }
+
+// 主界面的推演结果也进入对话流：判定依据是推演接口的 source + corrected
+function pushReasoning(res) {
+  if (!res) return
+  messages.value.push({ role: 'user', text: `推演请求：${res.context?.plot?.name || res.plot_code} 当前态势` })
+  messages.value.push({
+    role: 'assistant',
+    text: res.summary || '（无推演摘要）',
+    model: res.model || 'unknown',
+    latency_ms: res.latency_ms ?? 0,
+    degraded: !!res.degraded,
+    tag: sourceTag(res),
+    whitebox: Array.isArray(res.whitebox) ? res.whitebox : []
+  })
+  scrollToEnd()
+}
+
+// 指令闭环的状态回流：把 command_id/status 记在对应推演气泡上（不重跑推演）
+function updateReasoningCommand(nodeId, res) {
+  if (!nodeId || !res?.command_id) return
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.role === 'assistant' && m.whitebox && m.whitebox.length) {
+      m.commands = { ...(m.commands || {}), [nodeId]: { command_id: res.command_id, status: res.status || 'dispatched' } }
+      return
+    }
+  }
+}
+
+defineExpose({ pushReasoning, updateReasoningCommand })
 
 onMounted(() => {
   loadModels()
@@ -234,6 +286,15 @@ onMounted(() => {
   margin-left: 6px; font-size: 9.5px; color: #fbbf24;
   border: 1px solid rgba(251, 191, 36, 0.5); border-radius: 8px; padding: 0 5px;
 }
+/* 三段式来源标签：绿=主模型生成 / 黄=已校正 / 红=离线降级 */
+.src-tag {
+  display: inline-block; margin-right: 6px;
+  font-size: 9.5px; letter-spacing: 0.04em;
+  border: 1px solid var(--line-soft); border-radius: 2px; padding: 0 5px;
+}
+.src-tag.green { color: var(--green); border-color: rgba(52, 211, 153, 0.5); }
+.src-tag.warn { color: #fbbf24; border-color: rgba(251, 191, 36, 0.5); }
+.src-tag.red { color: var(--red); border-color: rgba(244, 63, 94, 0.5); }
 .mock-badge {
   font-size: 10px; color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.5);
   background: rgba(251, 191, 36, 0.1); border-radius: 9px; padding: 1px 7px;
