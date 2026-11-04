@@ -59,7 +59,7 @@
 
 ### 新增 · 数据表与 MQTT 主题
 
-- 新增 4 张表（启动时幂等建表）：`reasoning`（推演结论，含 `prompt` / `raw_response`）、`commands`（指令状态机）、`weather`（气象观测）、`shop_skus`（农资 SKU）。
+- 新增 4 张表（启动时幂等建表）：`reasoning`（推演结论，含 `prompt` / `raw_response`）、`commands`（指令状态机）、`weather`（气象观测）、`skus`（农资 SKU，幂等 seed 6 条）。
 - 新增 3 个 MQTT 主题：上行 `agri/weather/{plot_code}`（QoS 0）、下行 `agri/command/{plot_code}/{device_code}`（**QoS 1**）、上行 `agri/command_ack/{plot_code}/{device_code}`（QoS 1）。
 
 ### 变更
@@ -67,7 +67,7 @@
 - **环境变量 21 → 25**：新增 `RUNTIME_CONFIG_PATH` / `REASONING_TIMEOUT_SECONDS` / `COMMAND_ACK_TIMEOUT_SECONDS` / `WEATHER_INTERVAL_SECONDS`；契约升级到 **v1.2**。
 - `GET /api/meta` 由 V1 的 3 字段扩展为 5 字段超集，**V1 字段逐字保留**，老前端不受影响。
 - 前端默认入口从 V1 大屏变为 V2 主大屏；V1 大屏移到 `/legacy`。
-- `docs/API.md` 从 11 条接口扩展到 **23 条**（V1 11 + V2 12），响应体逐字段核对过 `backend/app/schemas.py` 与 `backend/app/routers/*.py` 源码。
+- `docs/API.md` 从 11 条接口扩展到 **22 条**（V1 11 + V2 11），响应体逐字段核对过 `backend/app/schemas.py` 与 `backend/app/routers/*.py` 源码。
 - 新增文档：`docs/ARCHITECTURE.md`（目录结构 + 数据库设计）、`docs/V2_PLAN.md`（实施方案）、`docs/V2_PITCH.md`（**答辩防御话术**）。
 
 ### 修复

@@ -251,7 +251,10 @@ agri-aiot-platform/
 │   ├── ARCHITECTURE.md           # 目录结构 + 数据库设计（表/索引/阈值/MQTT/接口清单）
 │   ├── V2_PLAN.md                # V2.0 实施方案（新增表 / 接口 / 推演树结构 / 降级口径）
 │   ├── V2_PITCH.md               # V2.0 答辩防御话术（主问题 / 追问 / 演示脚本 / 风险兜底）
-│   └── API.md                    # 接口文档（V1 11 条 + V2 12 条，方法/参数/示例请求/示例响应）
+│   ├── PROJECT_AUDIT.md          # 生产环境实测审计报告（依赖 / 规模 / 库 / 延迟 / 资源 / 闭环证据）
+│   ├── SPEECH_3MIN.md            # 3 分钟答辩逐字稿 + 数字速查卡
+│   ├── CAREER_PLAN.md            # 职业规划大赛《生涯发展报告》（成长赛道）
+│   └── API.md                    # 接口文档（22 条：V1 11 条 + V2 11 条，方法/参数/示例请求/示例响应）
 ├── docker-compose.yml            # 默认：拉 ghcr 预构建镜像
 ├── docker-compose.build.yml      # 可选：本地构建覆盖文件
 ├── .dockerignore                 # 构建上下文排除（.venv / node_modules / dist / data / .env …）
@@ -1110,7 +1113,7 @@ http://<服务器IP>:8000
 | GET | `/api/ai/history` | 问答历史 |
 | GET | `/api/meta` | 地块 / 告警阈值 / 模拟器配置（**V2 已扩展**为超集） |
 
-**V2.0 新增的 12 条**：
+**V2.0 新增的 11 条**（`/api/meta` 为扩展，不新增接口）：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -1295,7 +1298,7 @@ curl -s 'http://127.0.0.1:8000/api/shop/skus?keyword=抗旱'
 | `reasoning` | 每次推演的结构化结论（含 `source` / `corrected` / `prompt` / `raw_response`） |
 | `commands` | 指令下发与回执状态机 |
 | `weather` | 气象观测（模拟器上报） |
-| `shop_skus` | 农资 SKU |
+| `skus` | 农资 SKU（幂等 seed 6 条） |
 
 | MQTT 主题 | 方向 | QoS | 说明 |
 |---|---|---|---|

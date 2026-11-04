@@ -2,7 +2,7 @@
 
 > 本文是**设计文档**，用于交付说明与答辩讲解：给出项目目录结构、SQLite 数据库设计、告警阈值规则、MQTT 主题约定、REST 接口清单与环境变量。
 > **实现细节以 [docs/CONTRACT.md](CONTRACT.md)（冻结版契约，唯一真相）与源码为准**；本文若与二者不一致，以后者为准。
-> 目录树已与仓库受版本控制的 **80 个文件**（`git ls-files`）双向对齐；8 张表的 DDL 已与 `backend/app/db.py` 的 DDL 常量做空白归一后逐字比对（identical: True）。
+> 目录树已与仓库受版本控制的 **81 个文件**（`git ls-files`）双向对齐；8 张表的 DDL 已与 `backend/app/db.py` 的 DDL 常量做空白归一后逐字比对（identical: True）。
 
 ## 一、项目目录结构
 
@@ -95,7 +95,10 @@ agri-aiot-platform/
 │   ├── ARCHITECTURE.md               # 本文件：目录结构 + 数据库设计 + 阈值 + MQTT + 接口 + 环境变量
 │   ├── API.md                        # 接口文档（22 条：方法 / 参数 / 示例请求 / 示例响应）
 │   ├── V2_PLAN.md                    # V2.0 实施方案（规划稿）
-│   └── V2_PITCH.md                   # 答辩与演讲口径
+│   ├── V2_PITCH.md                   # 答辩与演讲口径
+│   ├── SPEECH_3MIN.md                # 3 分钟逐字稿 + 数字速查卡
+│   ├── PROJECT_AUDIT.md              # 生产环境实测审计报告
+│   ├── CAREER_PLAN.md                # 职业规划大赛《生涯发展报告》（成长赛道）
 ├── docker-compose.yml                # 默认：拉 ghcr 预构建镜像，一键起三容器
 ├── docker-compose.build.yml          # 可选覆盖文件：本地 build 而非拉镜像
 ├── .dockerignore                     # 构建上下文排除（.venv / node_modules / dist / data / .env …）
@@ -471,7 +474,7 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 | GET | /api/weather/latest | 最新气象 + 未来 24h 预报（无数据也 200） |
 | GET | /api/shop/skus | 农资 SKU 列表（`keyword` 模糊匹配） |
 
-> 源码侧：10 个 router 共 24 处路由装饰器 —— 22 处为上述 API，另 2 处在 `main.py:197/209`（`GET /` 与 `GET /{full_path:path}` 的静态托管兜底，标记 `include_in_schema=False`，不计入接口契约）。
+> 源码侧：10 个 router 共 **21** 处路由装饰器，加上 `main.py` 的 3 处 —— `GET /api/health`（计入契约）与 `GET /`、`GET /{full_path:path}`（静态托管兜底，`include_in_schema=False`，不计入契约），合计 24 处装饰器、**22 条接口**。
 
 ## 六、环境变量（共 25 个）
 

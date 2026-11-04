@@ -328,7 +328,7 @@ plot_code
 `docs/V2_PITCH.md` 含「减产 20% 怎么算的」完整话术；README/CHANGELOG/API.md/ARCHITECTURE.md 同步。
 
 ### 收尾：服务器覆盖部署
-覆盖 47.99.159.34 现有三容器，从**外网**直连复测全部新接口 + 推演 + 指令闭环 + `/legacy` + `/mobile`。
+覆盖现有三容器，从**外网**直连复测全部新接口 + 推演 + 指令闭环 + `/legacy` + `/mobile`。
 
 ---
 
