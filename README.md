@@ -110,7 +110,7 @@ Mock 降级兜底——**没有 API Key 也能完整演示**。
 | 服务器 | 阿里云轻量 2C2G / Ubuntu 22.04·24.04·26.04 | 目标运行环境（26.04 已实测） |
 
 **依赖极简原则**：前端只用 `vue` / `echarts` / `vite` / `@vitejs/plugin-vue`，
-后端只用 `fastapi` / `uvicorn` / `paho-mqtt` / `httpx`（`.env` 由 Docker Compose 的 `env_file` 注入，不依赖 `python-dotenv`）。
+后端只用 `fastapi` / `uvicorn` / `paho-mqtt` / `httpx` / `pydantic`（共 5 行，见 `backend/requirements.txt`；`.env` 由 Docker Compose 的 `env_file` 注入，不依赖 `python-dotenv`）。
 不引入 UI 框架、状态库、ORM。**每少一个依赖，构建峰值内存就低一截。**
 
 **V2.0 新增能力同样不引新依赖**：路由是 30 行手写的 `frontend/src/router.js`
