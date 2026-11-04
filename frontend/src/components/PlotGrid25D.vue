@@ -18,7 +18,10 @@
          地块卡只剩 60px 宽 —— 中文被省略号截断并相互重叠。 -->
     <template v-else>
       <div class="pg-stage">
-        <!-- 纯 CSS 3D：perspective 提供景深，内层 rotateX(55deg) 把平面压成俯视地块 -->
+        <!-- 纯 CSS 3D：perspective 提供景深，内层 rotateX(38deg) 把平面压成俯视地块。
+             倾角不能太大：文字会被 cos(倾角) 垂直压缩，55deg 时只剩 0.57 倍高度，
+             末行「12.5 亩 · 果实膨大期」看起来像被切掉一截。38deg 保留俯视透视，
+             字形高度 14.2px（55deg 时仅 11px）。 -->
         <div class="pg-scene">
           <div class="pg-plane" :style="planeStyle">
             <button
@@ -115,18 +118,18 @@ function select(p) {
   height: 100%;
   display: grid;
   gap: 10px;
-  transform: rotateX(55deg);
+  transform: rotateX(38deg);
   transform-style: preserve-3d;
   transition: transform 0.35s ease;
 }
-.pg-scene:hover .pg-plane { transform: rotateX(50deg); }
+.pg-scene:hover .pg-plane { transform: rotateX(34deg); }
 
 .tile {
   position: relative;
   display: flex; flex-direction: column; gap: 0;
   min-height: 0;
   min-width: 0;
-  padding: 7px 9px;
+  padding: 7px 9px 11px;
   text-align: left;
   font-family: inherit;
   color: var(--v2-text);
