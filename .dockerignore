@@ -3,7 +3,7 @@
 #
 # 实际被 COPY 的路径（改动本文件前请先核对这两行）：
 #   backend/Dockerfile   : frontend/（整目录）、backend/requirements.txt、backend/app
-#   simulator/Dockerfile : simulator/requirements.txt、simulator/mock_sensor.py
+#   simulator/Dockerfile : simulator/requirements.txt、simulator/mock_sensor.py、simulator/weather.py
 #
 # 目的：构建上下文只保留构建真正需要的文件。
 # 本仓库无关大目录实测体积：frontend/node_modules 100.6MB、.venv 35.3MB、data 4.3MB。
@@ -82,3 +82,4 @@ mosquitto
 !backend/requirements.txt
 !simulator/requirements.txt
 !simulator/mock_sensor.py
+!simulator/weather.py

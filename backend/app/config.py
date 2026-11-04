@@ -73,6 +73,15 @@ SIM_DEVICES = _str(
     "SIM_DEVICES",
     "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02",
 )
+# V2.1 C-1：滴灌真实速率（%/秒，28.8 点/小时，滴灌量级）。knowledge.py 的灌溉时长
+# 由本速率反推，两侧必须共用同一个值才自洽。
+SIM_IRRIGATION_RATE_PCT_PER_S = _float("SIM_IRRIGATION_RATE_PCT_PER_S", 0.008)
+# V2.1 C-1：显式演示加速倍率（压缩的是时钟，不是物理量）。1 = 完全真实。
+SIM_DEMO_ACCELERATION = _float("SIM_DEMO_ACCELERATION", 30.0)
+# V2.1 C-5：默认 0 = 不注入脏值（旧默认 0.12 会污染 summary 的 min/max）。
+SIM_BAD_PROBABILITY = _float("SIM_BAD_PROBABILITY", 0.0)
+# V2.1 C-5：演示场景 normal|drought|heat|disease|cold（连续过程，非单点）。
+SIM_SCENARIO = _str("SIM_SCENARIO", "normal").strip().lower() or "normal"
 
 # ---- 设备清单（契约第 3 节；后端种子数据与模拟器必须一致）----
 DEVICES = [
@@ -110,13 +119,15 @@ DEVICES = [
     },
 ]
 
-# ---- 告警阈值（契约第 6 节 v1.1，逐条照抄）----
+# ---- 告警阈值（契约第 6 节 v1.1 + V2.1 C-4，逐条照抄）----
 # temperature：正常 15~35℃；>38 或 <5 → critical；35~38 或 5~15 → warning
-# humidity   ：正常 40~85%；<40 或 >85 → warning；<30 或 >95 → critical（对称双档，无静默带）
+# humidity   ：正常 40~92%；92~97 或 <40 → warning；>97 或 <30 → critical（对称双档，无静默带）
+#              上限放宽到 92 是因为福建柑橘产区夜间湿度 85~95% 属常态，
+#              旧上限 85 会每天刷一批无意义告警（ClawsGo 审计 C-4）。
 # soil_moisture：正常 35~80%；<35 → warning；<25 → critical
 THRESHOLDS = {
     "temperature": {"min": 15.0, "max": 35.0, "critical_min": 5.0, "critical_max": 38.0},
-    "humidity": {"min": 40.0, "max": 85.0, "critical_min": 30.0, "critical_max": 95.0},
+    "humidity": {"min": 40.0, "max": 92.0, "critical_min": 30.0, "critical_max": 97.0},
     "soil_moisture": {"min": 35.0, "max": 80.0, "critical_min": 25.0},
 }
 
@@ -132,9 +143,9 @@ def meta_thresholds() -> dict:
         },
         "humidity": {
             "min": 40,
-            "max": 85,
+            "max": 92,
             "critical_min": 30,
-            "critical_max": 95,
+            "critical_max": 97,
         },
         "soil_moisture": {"min": 35, "max": 80, "critical_min": 25},
     }

@@ -1,4 +1,4 @@
-# 接口契约（冻结版 v1，V2.0 增量见 §9）—— 三路开发必须严格遵守
+# 接口契约（冻结版 v1，V2.0 增量见 §9，V2.1 增量见 §10）—— 三路开发必须严格遵守
 
 > 本文件是并行开发的唯一接口真相。任何一方不得单方面修改；如需变更，先改本文件。
 
@@ -18,7 +18,7 @@
 ## 2. 环境变量（.env.example 全量，代码只从环境变量读，禁止硬编码）
 ```
 APP_PORT=8000
-APP_VERSION=1.0.0
+APP_VERSION=2.0.0
 DB_PATH=/data/agri.db
 DATA_DIR=/data
 MQTT_HOST=mosquitto
@@ -36,7 +36,10 @@ OPENAI_MAX_RETRIES=1
 AI_HISTORY_LIMIT=50
 SIM_INTERVAL_SECONDS=5
 SIM_DEVICES=FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02
-SIM_BAD_PROBABILITY=0.12
+SIM_IRRIGATION_RATE_PCT_PER_S=0.008
+SIM_DEMO_ACCELERATION=30
+SIM_SCENARIO=normal
+SIM_BAD_PROBABILITY=0
 ALERT_COOLDOWN_SECONDS=300
 RUNTIME_CONFIG_PATH=/data/runtime_config.json
 REASONING_TIMEOUT_SECONDS=45
@@ -46,13 +49,20 @@ WEATHER_INTERVAL_SECONDS=30
 
 > 契约修订 v1.1：新增 `SIM_BAD_PROBABILITY`（模拟器越界注入概率，设 0 可关闭）与 `ALERT_COOLDOWN_SECONDS`（同 device_code+metric+level 的告警冷却秒数，防 5s 高频刷表）。
 >
-> 契约修订 v1.2（V2.0，共 25 个变量）：
+> 契约修订 v1.2（V2.0）：
 > - `RUNTIME_CONFIG_PATH`：WebUI 配置中心落盘路径，默认 `{DATA_DIR}/runtime_config.json`。该文件保存用户在大屏齿轮弹窗里填写的 base_url / api_key / model，**优先级高于环境变量**，且不得入库（.gitignore 必须显式覆盖）。
 > - `REASONING_TIMEOUT_SECONDS`：单次推演调用大模型的超时秒数，默认 45（比 `OPENAI_TIMEOUT_SECONDS` 宽，推演 prompt 更长）。
 > - `COMMAND_ACK_TIMEOUT_SECONDS`：指令下发后等待模拟器回执的秒数，超时把命令标记为 `timeout`，默认 30。
 > - `WEATHER_INTERVAL_SECONDS`：模拟器上报气象数据的间隔秒数，默认 30（与 5s 遥测解耦）。
 >
 > 配置优先级（三者取第一个有值的）：`runtime_config.json` > 环境变量 > 内置 Mock。无任何 Key 时 AI 与推演均降级为本地规则库，HTTP 仍 200。
+>
+> 契约修订 v1.3（V2.1，共 28 个变量）：
+> - `SIM_IRRIGATION_RATE_PCT_PER_S`：滴灌**真实**速率（%/秒），默认 0.008（≈28.8 点/小时）。后端 `knowledge.py` 与模拟器共用该常量。
+> - `SIM_DEMO_ACCELERATION`：演示加速倍率，默认 30（设 1 = 完全真实时间）。生效速率 = 上者 × 本值。
+> - `SIM_SCENARIO`：连续演示场景，`normal`(默认) | `drought` | `heat` | `disease` | `cold`。
+> - `SIM_BAD_PROBABILITY` 默认由 0.12 改为 **0**（默认不注入单点脏值）；`APP_VERSION` 由 1.0.0 改为 2.0.0。
+> - 湿度阈值与两条抑制规则变更见 §6，完整裁定见 §10。
 
 ## 3. MQTT 约定
 - 主题：`agri/telemetry/{plot_code}/{device_code}`（如 `agri/telemetry/A/FJ-CITRUS-A01`）
@@ -149,11 +159,13 @@ items 按 created_at 降序。
 **GET /api/ai/history** query: `limit`(默认 20，上限 AI_HISTORY_LIMIT)
 → `{"total":37,"items":[{"id":7,"question":"...","answer":"...","model":"...","degraded":0,"latency_ms":1200,"created_at":"..."}]}` 降序。
 
-**GET /api/meta** → `{"plots":[{"plot_code":"A","plot_name":"A区·柑橘示范园","devices":["FJ-CITRUS-A01","FJ-CITRUS-A02"]}],"thresholds":{"temperature":{"min":15,"max":35,"critical_min":5,"critical_max":38},"humidity":{"min":40,"max":85,"critical_min":30,"critical_max":95},"soil_moisture":{"min":35,"max":80,"critical_min":25}},"sim_interval_seconds":5}`
+**GET /api/meta** → `{"plots":[{"plot_code":"A","plot_name":"A区·柑橘示范园","devices":["FJ-CITRUS-A01","FJ-CITRUS-A02"]}],"thresholds":{"temperature":{"min":15,"max":35,"critical_min":5,"critical_max":38},"humidity":{"min":40,"max":92,"critical_min":30,"critical_max":97},"soil_moisture":{"min":35,"max":80,"critical_min":25}},"sim_interval_seconds":5}`
 
 ## 6. 告警阈值（config.py 常量，同时经 /api/meta 暴露给前端）
 - temperature：正常 15~35℃；>38 或 <5 → critical；35~38 或 5~15 → warning
-- humidity：正常 40~85%（无告警带）；<40 或 >85 → warning；<30 或 >95 → critical（消除原 30~40 / 85~95 的静默带）
+- humidity：正常 40~92%；<40 或 >92 → warning；<30 或 >97 → critical（消除原 30~40 / 85~95 的静默带）
+  - **V2.1 抑制规则 C-4**：湿度告警必须同时满足 ① 同一设备最近 `ALERT_SUSTAINED_SAMPLES`(3) 个采样全部越界，② 该设备最近一次气温 ≥ `HUMIDITY_ALERT_MIN_TEMPERATURE`(20℃)。福建夜间露点高，单点高湿是常态，不抑制会天天刷屏。
+  - 连续计数规则对 temperature / soil_moisture 同样生效（同一设备、同一指标）。
 - soil_moisture：正常 35~80%；<35 → warning；<25 → critical
 
 ## 7. 前端约束
@@ -178,7 +190,7 @@ items 按 created_at 降序。
 > V2.0 施工图见 `docs/V2_PLAN.md`。本节记录第一步后端交付后由调度方裁定的 5 个契约缺口。
 
 ### 9.1 湿度阈值静默带（已修，v1.1 起生效）
-原 `humidity` 只有 30~40 / 85~95 两段无定义 → 改为对称双档：正常 40~85；<40 或 >85 → warning；<30 或 >95 → critical。已落到 `backend/app/config.py` 的 `THRESHOLDS` 与 `/api/meta`。
+原 `humidity` 只有 30~40 / 85~95 两段无定义 → 改为对称双档（v1.1：正常 40~85；v1.3 进一步放宽为 **40~92**，见 §6 与 §10.4）。已落到 `backend/app/config.py` 的 `THRESHOLDS` 与 `/api/meta`。
 
 ### 9.2 新增环境变量（v1.2）
 `RUNTIME_CONFIG_PATH` / `REASONING_TIMEOUT_SECONDS` / `COMMAND_ACK_TIMEOUT_SECONDS` / `WEATHER_INTERVAL_SECONDS` 共 4 个，见第 2 节。
@@ -207,3 +219,39 @@ AC8 要求 V1 接口逐字段不变，但 `/api/meta` 被 V2_PLAN §6 明确列�
 | V1 的 11 个接口 | **本文件 §5（仍严格冻结，V2 只增不改）** |
 
 > 唯一例外是 §9.4 已裁定的 `/api/meta`：该接口按**超集**验收。
+
+## 10. V2.1 契约修订记录（调度方裁定，2026-11-04）
+
+针对 `01_数据与模拟改进清单.md`（ClawsGo 提出）的逐条核实结论，调度方冻结以下 5 项变更。实现位置与验收标准见 `docs/V2_PLAN.md`。
+
+### 10.1 C-1 灌溉物理：真实速率 × 显式演示加速
+模拟器不再有"自动灌溉脉冲"。灌溉只有一个入口：下行指令 `irrigation_on`。
+- 真实速率常量 `SIM_IRRIGATION_RATE_PCT_PER_S=0.008`（%/秒，即 28.8 点/小时）
+- 演示加速 `SIM_DEMO_ACCELERATION=30`（设 1 即完全真实时间）
+- 生效速率 = 0.008 × 30 = 0.24 %/真实秒 → 演示中 30 秒可见约 +7 点
+- `duration_min` 是**模拟分钟**，真实开闸时长 = `duration_min × 60 / SIM_DEMO_ACCELERATION`
+- `backend/app/knowledge.py` 的 `duration_min` 与 `delta` 必须与模拟器共用同一常量，误差 ≤ 1 点
+
+### 10.2 C-2 土壤蒸散：日失水 3~6 点
+`SoilPhysics.step()` 是土壤墒情的唯一推进入口，水源只有降雨与灌溉，蒸散是唯一失水项且降雨期间归零。
+- `ET_BASE_PCT_PER_H=0.19`，按气温与相对湿度修正（`ET_TEMP_COEFF=0.04`、`ET_HUMIDITY_COEFF=0.5`）
+- 降雨按湿润层 55% 入渗；`rain_mm` 由气象模块按**真实时间**给出，土壤侧不得二次放大
+- 相对偏移 `drift` 同时受输出区间钳制，墒情不允许越过 `[SOIL_MOISTURE_FLOOR, SOIL_MOISTURE_CEIL]`
+
+### 10.3 C-3 气象：单场 5~60 分钟、24h 累计 ≤ 40mm
+- `RAIN_EVENT_MIN_MINUTES=5` / `RAIN_EVENT_MAX_MINUTES=60` / `RAIN_INTENSITY_MIN_MM_H=0.5` / `RAIN_INTENSITY_MAX_MM_H=8`
+- 单场雨量 ≤ `RAIN_EVENT_MAX_MM=25`；24 小时窗口累计 ≤ `RAIN_24H_MAX_MM=40`（启动新雨时按剩余额度夹紧）
+- 雨强按月份系数（`MONTH_RAIN_FACTOR`）与小时系数调制，风向做随机游走平滑（不再整点跳变）
+
+### 10.4 C-4 告警抑制：连续采样 + 温度前置
+- 新增 `ALERT_SUSTAINED_SAMPLES=3`（同一设备同一指标连续 3 个采样越界才告警）
+- 新增 `HUMIDITY_ALERT_MIN_TEMPERATURE=20.0`（湿度告警需最近一次气温 ≥ 20℃）
+- 湿度正常区上限 85 → 92，critical 上限 95 → 97（详见 §6）
+
+### 10.5 C-5 脏值默认关闭，改用连续场景
+- `SIM_BAD_PROBABILITY` 默认 `0.12` → `0`：默认不再注入单点越界脏值。设 >0 时行为与 v1.1 相同（仅在注入时 payload 打 `injected` 标记）。
+- 新增 `SIM_SCENARIO`：`normal`(默认) | `drought` | `heat` | `disease` | `cold`，是**连续过程**而非单点注入，各场景时长见 `SCENARIO_HOURS`。
+- payload 新增 `sim_acceleration` 与 `scenario` 两个字段（增量，不破坏 V1 字段）。
+
+### 10.6 实现边界（不在本次修订内）
+清单中属"农学口径与推演模型"的条目（`_soil_device` 忽略 plot_code、露天园出现 `ventilation_on`、炭疽病配杀螨剂、`POWER_KWH_PER_MU` 与灌溉时长无关、减产率在阈值处跳变、未知 plot_code 编造默认值、四台设备形态无差别、南平种沃柑/沙糖桔）**留待 V2.1 第二步**处理，本文件届时再补 §11。

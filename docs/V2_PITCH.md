@@ -152,7 +152,7 @@ Vite 生产构建单进程就吃到 1.4GB，直接被 OOM Killer 杀掉（`exit 
 1. 前端（或接口）调 `POST /api/command/execute`，后端把指令**落库**为 `status=dispatched`；
 2. 后端向 `agri/command/{plot}/{device}` 发布 MQTT 报文，**QoS 1**；
 3. 模拟器订阅到这个主题，调 `apply_command()` **真实改变后续采样数值**——
-   开滴灌会把墒情回升速率设为 0.85%/秒并持续指定分钟数，所以下一轮遥测里墒情**真的会回升**；
+   开滴灌按真实速率 0.008%/秒补水，演示时乘 30 倍加速（0.24%/秒），30 秒左右墒情**真的会回升**约 7 个百分点；
 4. 模拟器向 `agri/command_ack/{plot}/{device}` 回执，后端把状态改成 `executed` 并记录 `ack_at`。
 
 如果 30 秒（`COMMAND_ACK_TIMEOUT_SECONDS`）内没收到回执，后台的扫描任务会把它标成 `timeout`。

@@ -7,7 +7,9 @@
 口径（冻结，答辩口径）：
 - 亩均滴灌耗电 POWER_KWH_PER_MU = 0.15 kWh/亩；
 - 水分胁迫减产按「缺水深度 × 持续时间」在 15~25% 区间线性插值；
-- 无水分胁迫时减产为 0（不虚报）。
+- 无水分胁迫时减产为 0（不虚报）；
+- V2.1 C-1：灌溉时长由 config.SIM_IRRIGATION_RATE_PCT_PER_S 反推，与模拟器共用同一速率，
+  保证「按 duration_min 灌溉 rate×60×duration_min 个百分点」两侧自洽（误差 ≤1 点）。
 
 本模块**不访问网络、不访问数据库**，纯函数，便于单测与答辩讲解。
 """
@@ -208,12 +210,15 @@ def build_interventions(context: dict, level: str, power_kwh: float) -> list[dic
 
     plans: list[dict] = []
 
+    # V2.1 C-1：滴灌速率（点/分钟）——与模拟器共用 config 里的同一个常量，改一处两侧同步。
+    per_minute = config.SIM_IRRIGATION_RATE_PCT_PER_S * 60.0
+
     if soil is not None and soil < soil_th["min"]:
-        # 目标墒情：灌到正常区间中位（min 与 max 的中点），换算成时长。
+        # 目标墒情：灌到正常区间中位（min 与 max 的中点），由速率反推时长。
         target = (soil_th["min"] + soil_th["max"]) / 2.0
         deficit = max(target - soil, 0.0)
-        duration_min = int(_clamp(round(deficit * 2.2), 10, 90))
-        delta = round(min(deficit, 40.0), 1)
+        duration_min = int(_clamp(round(deficit / per_minute), 10, 240))
+        delta = round(min(per_minute * duration_min, 100.0), 1)
         plans.append({
             "action": "irrigation_on",
             "params": {"duration_min": duration_min},
@@ -228,6 +233,8 @@ def build_interventions(context: dict, level: str, power_kwh: float) -> list[dic
             "reason": (
                 f"墒情 {soil}% 低于正常下限 {soil_th['min']}%，"
                 f"灌至区间中位 {target:.0f}% 需 {duration_min} 分钟"
+                f"（滴灌 {config.SIM_IRRIGATION_RATE_PCT_PER_S}%/秒 × 60 = {per_minute:.2f} 点/分钟，"
+                f"补水 {delta} 点）"
             ),
         })
 
@@ -267,7 +274,10 @@ def build_interventions(context: dict, level: str, power_kwh: float) -> list[dic
             "device_code": device_code,
             "label": "预防性滴灌 15 分钟",
             "sub": f"维持墒情在 {soil_th['min']:.0f}~{soil_th['max']:.0f}% 区间",
-            "effect": {"soil_moisture_delta": 4.0, "yield_recover_pct": 0.0},
+            "effect": {
+                "soil_moisture_delta": round(per_minute * 15.0, 1),
+                "yield_recover_pct": 0.0,
+            },
             "sku_keywords": ["滴灌带"],
             "reason": f"当前各项指标正常，按 {area_mu} 亩面积做一次预防性小水勤灌",
         })

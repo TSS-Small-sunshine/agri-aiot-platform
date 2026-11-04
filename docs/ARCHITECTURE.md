@@ -102,7 +102,7 @@ agri-aiot-platform/
 ├── docker-compose.yml                # 默认：拉 ghcr 预构建镜像，一键起三容器
 ├── docker-compose.build.yml          # 可选覆盖文件：本地 build 而非拉镜像
 ├── .dockerignore                     # 构建上下文排除（.venv / node_modules / dist / data / .env …）
-├── .env.example                      # 全部 25 个环境变量 + 中文注释
+├── .env.example                      # 全部 28 个环境变量 + 中文注释
 ├── .gitignore
 ├── README.md                         # 部署与运维保姆级文档
 └── CHANGELOG.md                      # 更新日志 + 技术难点与解决思路
@@ -355,18 +355,20 @@ CREATE TABLE IF NOT EXISTS skus (
 | 指标 | 正常区间 | warning | critical |
 |---|---|---|---|
 | temperature | 15~35 ℃ | 35~38 或 5~15 | > 38 或 < 5 |
-| humidity | 40~85 % | < 40 或 > 85 | < 30 或 > 95 |
+| humidity | 40~92 % | < 40 或 > 92 | < 30 或 > 97 |
 | soil_moisture | 35~80 % | < 35 | < 25 |
 
 字段取值（与源码逐字一致）：
 
 - `temperature`：`min 15.0`、`max 35.0`、`critical_min 5.0`、`critical_max 38.0`。
-- `humidity`：`min 40.0`、`max 85.0`、`critical_min 30.0`、`critical_max 95.0`。
+- `humidity`：`min 40.0`、`max 92.0`、`critical_min 30.0`、`critical_max 97.0`。
 - `soil_moisture`：`min 35.0`、`max 80.0`、`critical_min 25.0`（无上限档）。
 
 - **humidity 为对称双档**，不留 30~40 / 85~95 的静默带（`alerts.py` 的 `evaluate_humidity` 先判 critical 再判 warning）。
 - **设备离线判定**：`last_seen` 距今 > `DEVICE_OFFLINE_SECONDS`（默认 30 秒）即 `offline`。
 - **告警冷却**：同一 `device_code + metric + level` 在 `ALERT_COOLDOWN_SECONDS`（默认 300 秒）内不重复写表，避免 5 秒高频上报刷爆 `alerts`。
+- **连续采样抑制（V2.1 C-4）**：同一设备同一指标需最近 `ALERT_SUSTAINED_SAMPLES`（3）个采样**全部越界**才告警；单点毛刺不落库。
+- **湿度温度前置（V2.1 C-4）**：湿度告警还要求该设备最近一次气温 ≥ `HUMIDITY_ALERT_MIN_TEMPERATURE`（20℃）。福建夜间露点常年 90% 以上，不加此条件会整夜刷屏。
 
 ## 四、MQTT 主题约定
 
@@ -476,9 +478,9 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 
 > 源码侧：10 个 router 共 **21** 处路由装饰器，加上 `main.py` 的 3 处 —— `GET /api/health`（计入契约）与 `GET /`、`GET /{full_path:path}`（静态托管兜底，`include_in_schema=False`，不计入契约），合计 24 处装饰器、**22 条接口**。
 
-## 六、环境变量（共 25 个）
+## 六、环境变量（共 28 个）
 
-全部 25 个可调参数见仓库根 `.env.example`（含中文注释与默认值），代码只从环境变量读取，零硬编码。名称与顺序与 `.env.example` 完全一致：
+全部 28 个可调参数见仓库根 `.env.example`（含中文注释与默认值），代码只从环境变量读取，零硬编码。名称与顺序与 `.env.example` 完全一致：
 
 | # | 变量 | 默认值 | 说明 |
 |---|---|---|---|
@@ -501,14 +503,17 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 | 17 | AI_HISTORY_LIMIT | 50 | 对话历史条数上限 |
 | 18 | SIM_INTERVAL_SECONDS | 5 | 模拟器遥测上报间隔 |
 | 19 | SIM_DEVICES | FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02 | 模拟设备清单 |
-| 20 | SIM_BAD_PROBABILITY | 0.12 | 模拟器注入越界值的概率 |
-| 21 | ALERT_COOLDOWN_SECONDS | 300 | 同设备同指标同级别的告警冷却秒数 |
-| 22 | RUNTIME_CONFIG_PATH | /data/runtime_config.json | 运行时配置落盘路径（含明文 Key，已 gitignore） |
-| 23 | REASONING_TIMEOUT_SECONDS | 45 | 推演超时（比对话更宽） |
-| 24 | COMMAND_ACK_TIMEOUT_SECONDS | 30 | 指令等回执时限，超时标 timeout |
-| 25 | WEATHER_INTERVAL_SECONDS | 30 | 模拟器气象上报间隔 |
+| 20 | SIM_IRRIGATION_RATE_PCT_PER_S | 0.008 | 滴灌真实速率（%/秒），与后端 `knowledge.py` 共用 |
+| 21 | SIM_DEMO_ACCELERATION | 30 | 演示加速倍率（1 = 完全真实时间） |
+| 22 | SIM_SCENARIO | normal | 连续演示场景：normal / drought / heat / disease / cold |
+| 23 | SIM_BAD_PROBABILITY | 0 | 单点越界脏值注入概率（默认关闭） |
+| 24 | ALERT_COOLDOWN_SECONDS | 300 | 同设备同指标同级别的告警冷却秒数 |
+| 25 | RUNTIME_CONFIG_PATH | /data/runtime_config.json | 运行时配置落盘路径（含明文 Key，已 gitignore） |
+| 26 | REASONING_TIMEOUT_SECONDS | 45 | 推演超时（比对话更宽） |
+| 27 | COMMAND_ACK_TIMEOUT_SECONDS | 30 | 指令等回执时限，超时标 timeout |
+| 28 | WEATHER_INTERVAL_SECONDS | 30 | 模拟器气象上报间隔 |
 
-> `SIM_WEATHER_ENABLED` 不在契约的 25 个变量内：它由 `docker-compose.yml` 的 simulator 服务显式注入（源码缺省即视为开启）。
+> `SIM_WEATHER_ENABLED` 不在契约的 28 个变量内：它由 `docker-compose.yml` 的 simulator 服务显式注入（源码缺省即视为开启）。
 
 分组速览：
 
@@ -516,5 +521,5 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 - MQTT 与设备：`MQTT_HOST`、`MQTT_PORT`、`MQTT_TOPIC`、`DEVICE_OFFLINE_SECONDS`。
 - 保留与查询上限：`TELEMETRY_RETENTION_DAYS`、`HISTORY_HOURS_MAX`。
 - 大模型：`OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODEL`、`OPENAI_TIMEOUT_SECONDS`、`OPENAI_MAX_RETRIES`、`AI_HISTORY_LIMIT`。
-- 模拟器与告警：`SIM_INTERVAL_SECONDS`、`SIM_DEVICES`、`SIM_BAD_PROBABILITY`、`ALERT_COOLDOWN_SECONDS`。
+- 模拟器与告警：`SIM_INTERVAL_SECONDS`、`SIM_DEVICES`、`SIM_IRRIGATION_RATE_PCT_PER_S`、`SIM_DEMO_ACCELERATION`、`SIM_SCENARIO`、`SIM_BAD_PROBABILITY`、`ALERT_COOLDOWN_SECONDS`。
 - V2 运行时与闭环：`RUNTIME_CONFIG_PATH`、`REASONING_TIMEOUT_SECONDS`、`COMMAND_ACK_TIMEOUT_SECONDS`、`WEATHER_INTERVAL_SECONDS`。

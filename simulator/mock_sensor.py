@@ -1,9 +1,9 @@
 """MQTT 传感器模拟器：遥测上行 + 气象上行 + 指令下行订阅并**真的改变行为** + 回执。
 
 数据形态（"像真的"）：
-- 温度 / 湿度 / 土壤温度 / 墒情 = 日周期正弦 + 随机噪声；
-- 墒情另叠加"灌溉脉冲"（缓慢下降、偶发回升）；
-- 按 SIM_BAD_PROBABILITY 概率制造越界值，用于触发并演示告警链路；
+- 温度 / 湿度 / 土壤温度 = 日周期正弦 + 随机噪声；
+- 土壤墒情 = 蒸散失水（3~6 点/天，随温度升高加快、随湿度升高减慢、降雨期间归零）
+  + 降雨补给 + 灌溉指令补给（V2.1 C-1/C-2）；
 - 电池电压缓慢单调下降。
 
 V2 新增（V2_PLAN.md 第 5/9 节）：
@@ -11,6 +11,14 @@ V2 新增（V2_PLAN.md 第 5/9 节）：
 - 订阅 agri/command/{plot}/{device}（QoS 1），irrigation_on / irrigation_off /
   pesticide_dose / ventilation_on 会**真实改变后续采样数值**（见 apply_command）；
 - 执行后向 agri/command_ack/{plot}/{device} 回执（QoS 1）。
+
+V2.1 变更（ClawsGo 审计 P0-1/P0-2/P0-4）：
+- 灌溉速率改为"真实速率 × 显式演示加速"：SIM_IRRIGATION_RATE_PCT_PER_S（默认 0.008 %/s）
+  × SIM_DEMO_ACCELERATION（默认 30）→ 默认 0.24 %/s，30 秒约 +7.2 点（旧值 0.85 %/s
+  会在 30 秒拉高 25.5 点，物理上不可能）；
+- **删除**了"墒情低于 -6 自动灌溉脉冲"的本地自主行为：土壤补水只有两个来源——降雨与灌溉指令；
+- SIM_BAD_PROBABILITY 默认改为 0（不注入）；设 >0 时仍注入单点越界，但 payload 带 injected=true；
+- 新增 SIM_SCENARIO（normal/drought/heat/disease/cold），场景是连续过程而非单点。
 
 断线自动重连；Broker 不可达时只打印重连提示，绝不退出。
 仅依赖 paho-mqtt + 标准库。
@@ -34,20 +42,45 @@ try:  # 包方式导入（python -m simulator.mock_sensor）
 except ImportError:  # 脚本方式导入（python simulator/mock_sensor.py）
     import weather as weather_mod
 
+
+def _env_float(name: str, default: float) -> float:
+    """读取浮点环境变量；未设置/空串/非法值一律回落默认值。"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"[simulator] 环境变量 {name}={raw!r} 不是数字，回落默认 {default}", flush=True)
+        return default
+
+
 # ---------------- 配置（全部走环境变量） ----------------
 MQTT_HOST = os.getenv("MQTT_HOST") or "localhost"
 MQTT_PORT = int(os.getenv("MQTT_PORT") or 1883)
-SIM_INTERVAL_SECONDS = float(os.getenv("SIM_INTERVAL_SECONDS") or 5)
-SIM_BAD_PROBABILITY = float(os.getenv("SIM_BAD_PROBABILITY") or 0.12)
+SIM_INTERVAL_SECONDS = _env_float("SIM_INTERVAL_SECONDS", 5.0)
+# V2.1 C-5：默认 0，不再默认注入单点越界（旧默认 0.12 会污染 summary 的 min/max）
+SIM_BAD_PROBABILITY = _env_float("SIM_BAD_PROBABILITY", 0.0)
 SIM_DEVICES_RAW = os.getenv("SIM_DEVICES") or "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02"
 TOPIC_TEMPLATE = os.getenv("MQTT_TOPIC_TEMPLATE") or "agri/telemetry/{plot_code}/{device_code}"
 # V2：气象发布间隔与下行指令主题（与后端 config.py 同源）
-WEATHER_INTERVAL_SECONDS = float(os.getenv("WEATHER_INTERVAL_SECONDS") or 30)
+WEATHER_INTERVAL_SECONDS = _env_float("WEATHER_INTERVAL_SECONDS", 30.0)
 WEATHER_TOPIC_TEMPLATE = os.getenv("MQTT_WEATHER_TOPIC_TEMPLATE") or "agri/weather/{plot_code}"
 COMMAND_TOPIC = os.getenv("MQTT_COMMAND_TOPIC") or "agri/command/+/+"
 COMMAND_ACK_TEMPLATE = os.getenv("MQTT_COMMAND_ACK_TOPIC_TEMPLATE") or "agri/command_ack/{plot_code}/{device_code}"
 COMMAND_ACK_QOS = int(os.getenv("MQTT_COMMAND_QOS") or 1)
 WEATHER_ENABLED = (os.getenv("SIM_WEATHER_ENABLED") or "1").strip() not in ("0", "false", "False")
+
+# V2.1 C-1：灌溉速率 = 真实速率 × 演示加速（默认 0.008 %/s × 30 = 0.24 %/s）
+SIM_IRRIGATION_RATE_PCT_PER_S = _env_float("SIM_IRRIGATION_RATE_PCT_PER_S", 0.008)
+SIM_DEMO_ACCELERATION = _env_float("SIM_DEMO_ACCELERATION", 30.0)
+
+# V2.1 C-5：演示场景
+SCENARIO_NAMES = ("normal", "drought", "heat", "disease", "cold")
+SIM_SCENARIO = (os.getenv("SIM_SCENARIO") or "normal").strip().lower()
+if SIM_SCENARIO not in SCENARIO_NAMES:
+    print(f"[simulator] 未知场景 {SIM_SCENARIO!r}，回落 normal（可选：{', '.join(SCENARIO_NAMES)}）", flush=True)
+    SIM_SCENARIO = "normal"
 
 # 设备清单（契约第 3 节，与后端种子数据一致）
 DEVICE_CATALOG = {
@@ -74,8 +107,25 @@ OUT_OF_RANGE = {
     "soil_moisture": [18.0, 22.5, 27.0, 30.5, 82.0, 86.5],
 }
 
-# 指令可改变行为的时长上限（分钟），防止异常 params 让设备长期跑偏
-MAX_EFFECT_MINUTES = 180.0
+# 指令可改变行为的时长上限（分钟），防止异常 params 让设备长期跑偏。
+# 取值必须 ≥ knowledge.py 的灌溉时长上限（240），否则后端算出的指令会被静默截断，
+# 回执里"预计补水"与实际生效时长就对不上了（V2.1 复核修）。
+MAX_EFFECT_MINUTES = 240.0
+
+# V2.1 C-2：蒸散口径 —— 日失水 3~6 点（0.125~0.25 点/小时），无雨无灌溉时适用
+ET_BASE_PCT_PER_H = 0.19
+ET_TEMP_COEFF = 0.04        # 每高于 25℃ 1℃ 加快 4%
+ET_HUMIDITY_COEFF = 0.5     # 相对湿度每 1% 减缓 0.5%（0% RH → ×1.0，100% RH → ×0.5）
+ET_RAIN_DAMPING = 0.6       # 有降雨时进一步减缓
+SOIL_MOISTURE_FLOOR = 2.0
+SOIL_MOISTURE_CEIL = 100.0
+
+# V2.1 C-5：场景时长（模拟小时）与目标值
+SCENARIO_HOURS = {"drought": 6.0, "heat": 6.0, "disease": 4.0, "cold": 8.0}
+DROUGHT_TARGET_SOIL = 28.0
+HEAT_TARGET_TEMP = 39.0
+DISEASE_TARGET_HUMIDITY = 98.0
+COLD_TARGET_TEMP = 3.0
 
 
 def local_now() -> datetime:
@@ -87,6 +137,10 @@ def iso(dt: datetime) -> str:
 
 
 def _minutes(params: dict, key: str, default: float) -> float:
+    """取时长（分钟）并夹在 [1, MAX_EFFECT_MINUTES]，返回夹紧后的值。
+
+    调用方据此生成回执，避免"声称的时长"与"实际生效时长"不一致。
+    """
     try:
         value = float(params.get(key))
     except (TypeError, ValueError):
@@ -94,61 +148,193 @@ def _minutes(params: dict, key: str, default: float) -> float:
     return max(1.0, min(MAX_EFFECT_MINUTES, value))
 
 
+def _effective_irrigation_rate() -> float:
+    """生效灌溉速率（%/真实秒）= 真实速率 × 演示加速。"""
+    return SIM_IRRIGATION_RATE_PCT_PER_S * SIM_DEMO_ACCELERATION
+
+
+class Scenario:
+    """V2.1 C-5：连续过程式演示场景（不是单点注入）。
+
+    进度按"模拟小时"推进并除以演示加速倍率：SIM_DEMO_ACCELERATION=30 时，
+    6 模拟小时 = 12 真实分钟；设为 1 则完全按真实时间推进。
+    """
+
+    def __init__(self, name: str, acceleration: float):
+        self.name = name
+        self.acceleration = max(acceleration, 1e-6)
+        self.started = time.time()
+        self.progress = 0.0
+        hours = SCENARIO_HOURS.get(name, 0.0)
+        self.duration_s = hours * 3600.0 / self.acceleration if hours else 0.0
+        if name in SCENARIO_HOURS:
+            print(
+                f"[simulator] 演示场景 {name}：{hours:.0f} 模拟小时，"
+                f"按 {self.acceleration:.0f} 倍加速约需 {self.duration_s / 60:.1f} 真实分钟",
+                flush=True,
+            )
+
+    def tick(self, now_ts: float) -> None:
+        if self.duration_s <= 0:
+            self.progress = 0.0
+            return
+        self.progress = min(1.0, max(0.0, (now_ts - self.started) / self.duration_s))
+
+    def soil_target(self, plot_code: str, base_soil: float) -> float | None:
+        """干旱场景：A 区墒情从基线线性降到 28%。"""
+        if self.name != "drought" or plot_code != "A":
+            return None
+        return base_soil - (base_soil - DROUGHT_TARGET_SOIL) * self.progress
+
+    def ambient(
+        self, plot_code: str, base_temp: float, base_humidity: float, hour: float
+    ) -> tuple[float | None, float | None]:
+        """高温 / 病害 / 低温场景的气温与湿度覆盖值。"""
+        if self.name == "heat" and plot_code == "B":
+            return base_temp + (HEAT_TARGET_TEMP - base_temp) * self.progress, None
+        if self.name == "disease" and plot_code == "B":
+            return None, 92.0 + (DISEASE_TARGET_HUMIDITY - 92.0) * self.progress
+        if self.name == "cold" and plot_code == "B":
+            night = 1.0 if (hour < 6.0 or hour >= 20.0) else 0.35
+            return base_temp + (COLD_TARGET_TEMP - base_temp) * self.progress * night, None
+        return None, None
+
+
+class SoilPhysics:
+    """V2.1 C-1/C-2：土壤墒情物理量（唯一入口是 step()）。
+
+    水源只有两个：降雨（由气象状态给出 rain_mm）与灌溉指令；
+    蒸散是唯一的失水项，且降雨期间归零。
+    """
+
+    def __init__(self, base: float):
+        self.base = base
+        self.drift = 0.0          # 相对基线的偏移（点）
+        self.wet = 0.0            # 湿润层余量（点·秒），用于降雨/灌溉后先补后渗
+        self.irrigating_until = 0.0
+        self.irrigating_rate = 0.0
+        self.last_et = 0.0
+        self.acceleration = max(SIM_DEMO_ACCELERATION, 1e-6)
+
+    def start_irrigation(self, now_ts: float, minutes: float) -> tuple[float, float]:
+        """minutes 是"模拟分钟"：按演示加速折算成真实秒后开闸。
+
+        速率取**真实速率**（%/模拟秒），于是总补水量 = SIM_IRRIGATION_RATE_PCT_PER_S
+        × 60 × minutes 个百分点，与 knowledge.py 的灌溉时长口径严格自洽（V2.1 C-1/AC2）。
+        """
+        real_seconds = minutes * 60.0 / self.acceleration
+        self.irrigating_until = now_ts + real_seconds
+        self.irrigating_rate = SIM_IRRIGATION_RATE_PCT_PER_S
+        return self.irrigating_rate, real_seconds
+
+    def stop_irrigation(self) -> None:
+        self.irrigating_until = 0.0
+        self.irrigating_rate = 0.0
+
+    @property
+    def irrigating(self) -> bool:
+        return self.irrigating_rate > 0 and time.time() < self.irrigating_until
+
+    def step(self, elapsed: float, temperature: float, humidity: float, rain_mm: float) -> float:
+        """推进一个时间步（elapsed = **模拟秒**），返回本次灌溉补水量（点）。
+
+        蒸散与灌溉都按模拟时间推进（演示加速压缩的是时钟，不是物理量）；
+        rain_mm 由调用方按真实时间从气象状态换算后传入 —— 气象模块是降雨量的唯一权威，
+        避免土壤侧二次放大把 24h 累计雨量算成上限的 30 倍。
+        """
+        elapsed = max(float(elapsed), 0.0)
+        # 1) 灌溉补给（模拟时间推进；开闸时长已在 start_irrigation 里按加速折算）
+        irrigated = 0.0
+        if time.time() < self.irrigating_until and self.irrigating_rate > 0:
+            irrigated = self.irrigating_rate * elapsed
+            self.drift += irrigated
+        elif self.irrigating_rate > 0:
+            self.irrigating_rate = 0.0  # 到时自动停止
+
+        # 2) 降雨补给（先补湿润层，超出部分按 55% 入渗）
+        if rain_mm > 0:
+            self.wet += rain_mm * 1.5
+        if self.wet > 0:
+            absorbed = min(self.wet, elapsed * 0.02)
+            self.wet -= absorbed
+            self.drift += absorbed * 0.55
+
+        # 3) 蒸散失水（降雨期间归零）
+        et_per_h = (
+            ET_BASE_PCT_PER_H
+            * (1.0 + ET_TEMP_COEFF * (temperature - 25.0))
+            * (1.0 - ET_HUMIDITY_COEFF * humidity / 100.0)
+        )
+        if rain_mm > 0:
+            et_per_h *= 1.0 - ET_RAIN_DAMPING
+        et_per_h = max(0.0, et_per_h)
+        self.last_et = et_per_h
+        self.drift -= et_per_h * elapsed / 3600.0
+
+        self.drift = max(-60.0, min(60.0, self.drift))
+        # 输出上限：墒情不允许越过 [FLOOR, CEIL]，相对偏移也一并封顶。
+        # 否则灌溉会把 drift 一路推到 +60，输出虽被 DeviceState 截到 100，
+        # 停止补水后却要回落很久，看起来像"关闸了还在涨"（V2.1 复核修）。
+        self.drift = max(SOIL_MOISTURE_FLOOR - self.base,
+                         min(SOIL_MOISTURE_CEIL - self.base, self.drift))
+        return irrigated
+
+    def value(self, elapsed: float) -> float:
+        return self.base + self.drift + random.gauss(0, 0.35)
+
+
 class DeviceState:
     """单台设备的连续状态，保证相邻采样平滑变化而不是白噪声。"""
 
-    def __init__(self, device_code: str):
+    def __init__(self, device_code: str, scenario: Scenario | None = None):
         self.device_code = device_code
         base = BASELINE.get(device_code, BASELINE["FJ-CITRUS-A01"])
         self.plot_code = DEVICE_CATALOG.get(device_code, {}).get("plot_code", "A")
         self.type = DEVICE_CATALOG.get(device_code, {}).get("type", "env")
         self.base = dict(base)
-        self.phase = random.uniform(0, 2 * math.pi)
-        self.drift = 0.0
+        self.scenario = scenario or Scenario("normal", SIM_DEMO_ACCELERATION)
+        self.soil = SoilPhysics(base["soil_moisture"])
         self.battery = base["battery"]
-        # 灌溉状态：上次灌溉时间与灌溉剩余量
-        self.irrigation_until = 0.0
-        self.irrigation_rate = 0.0
         # V2：指令造成的持续扰动窗口
         self.pesticide_until = 0.0
         self.ventilation_until = 0.0
         self.last_command: dict | None = None
+        # 降雨速率（点/秒的等效水量，mm/s），由气象状态按地块喂入
+        self.rain_rate = 0.0
+        self.last_injected = False
+        self.last_metrics: dict = {}
 
     # ---- 物理量生成 ----
-    def _daily(self, amplitude: float, peak_hour: float = 14.0) -> float:
+    def _daily(self, amplitude: float, peak_hour: float, now: datetime) -> float:
         """日周期正弦：峰值出现在 peak_hour 左右。"""
-        now = local_now()
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
-        angle = 2 * math.pi * (hour - peak_hour) / 24.0
-        return amplitude * math.cos(angle)
+        return amplitude * math.cos(2 * math.pi * (hour - peak_hour) / 24.0)
 
-    def _soil_moisture(self, elapsed: float) -> float:
-        now_ts = time.time()
-        # 土壤持续失水（蒸散）
-        self.drift -= 0.010 * elapsed
-        # 低于 -6.0 时自动触发一次灌溉脉冲（本地自主行为，与下行指令无关）
-        if self.drift < -6.0 and now_ts > self.irrigation_until:
-            self.irrigation_until = now_ts + random.uniform(20, 40)
-            self.irrigation_rate = random.uniform(0.22, 0.42)
-        if now_ts < self.irrigation_until:
-            self.drift += self.irrigation_rate * elapsed
-        else:
-            self.irrigation_rate = 0.0
-        self.drift = max(-16.0, min(20.0, self.drift))
-        noise = random.gauss(0, 0.35)
-        return self.base["soil_moisture"] + self.drift + noise
+    def set_rain_rate(self, mm_per_s: float) -> None:
+        """由气象状态喂入当前雨强（mm/s）。"""
+        self.rain_rate = max(0.0, float(mm_per_s))
 
-    def sample(self, elapsed: float) -> dict:
-        bad = random.random() < SIM_BAD_PROBABILITY
-        bad_metric = random.choice(list(OUT_OF_RANGE)) if bad else None
+    def sample(self, sim_elapsed: float, real_elapsed: float | None = None,
+               now: datetime | None = None) -> dict:
+        """sim_elapsed = 模拟秒（已乘演示加速）；real_elapsed 用于电池等真实时间量。"""
+        elapsed = max(float(sim_elapsed), 0.0)
+        real_elapsed = max(float(real_elapsed if real_elapsed is not None else sim_elapsed), 0.0)
+        now = now or local_now()
+        now_ts = now.timestamp()
+        hour = now.hour + now.minute / 60.0 + now.second / 3600.0
 
-        temperature = self.base["temperature"] + self._daily(5.2) + random.gauss(0, 0.35)
-        humidity = self.base["humidity"] - self._daily(9.0) + random.gauss(0, 1.1)
-        soil_moisture = self._soil_moisture(elapsed)
-        soil_temp = self.base["soil_temp"] + self._daily(2.4, peak_hour=16.0) + random.gauss(0, 0.2)
+        temperature = self.base["temperature"] + self._daily(5.2, 14.0, now) + random.gauss(0, 0.35)
+        humidity = self.base["humidity"] - self._daily(9.0, 14.0, now) + random.gauss(0, 1.1)
+        soil_temp = self.base["soil_temp"] + self._daily(2.4, 16.0, now) + random.gauss(0, 0.2)
+
+        # V2.1 C-5：演示场景是连续过程（对气温/湿度做时间插值覆盖）
+        scene_temp, scene_humidity = self.scenario.ambient(self.plot_code, temperature, humidity, hour)
+        if scene_temp is not None:
+            temperature = scene_temp
+        if scene_humidity is not None:
+            humidity = scene_humidity
 
         # V2：下行指令造成的可观测扰动
-        now_ts = time.time()
         if now_ts < self.ventilation_until:
             temperature -= 1.8
             humidity -= 6.0
@@ -156,20 +342,36 @@ class DeviceState:
             soil_temp -= 1.5
             humidity += 4.0
 
-        self.battery = max(5.0, self.battery - random.uniform(0.0008, 0.004) * max(elapsed, 1.0))
+        humidity = max(5.0, min(100.0, humidity))
+
+        # V2.1 C-1/C-2：土壤墒情完全由 SoilPhysics 推进（蒸散 + 降雨 + 灌溉）
+        rain_mm = self.rain_rate * real_elapsed  # 降雨按真实时间计（气象模块是权威）
+        self.soil.step(elapsed, temperature, humidity, rain_mm)
+        # 干旱场景：把墒情按过程强拉向目标值（仍可被灌溉指令叠加）
+        target = self.scenario.soil_target(self.plot_code, self.base["soil_moisture"])
+        if target is not None:
+            current = self.soil.base + self.soil.drift
+            self.soil.drift += (target - current) * 0.35
+        soil_moisture = self.soil.value(elapsed)
+
+        self.battery = max(5.0, self.battery - random.uniform(0.0008, 0.004) * max(real_elapsed, 1.0))
 
         metrics = {
             "temperature": round(temperature, 1),
-            "humidity": round(max(5.0, min(100.0, humidity)), 1),
-            "soil_moisture": round(max(2.0, min(100.0, soil_moisture)), 1),
+            "humidity": round(humidity, 1),
+            "soil_moisture": round(max(SOIL_MOISTURE_FLOOR, min(SOIL_MOISTURE_CEIL, soil_moisture)), 1),
             "soil_temp": round(soil_temp, 1),
             "battery": round(self.battery, 1),
         }
 
-        # 注入越界值：直接在合法量上叠加，确保跨过阈值
-        if bad_metric:
+        # V2.1 C-5：默认不注入（SIM_BAD_PROBABILITY=0）；显式开启时打标记便于区分
+        self.last_injected = False
+        if SIM_BAD_PROBABILITY > 0 and random.random() < SIM_BAD_PROBABILITY:
+            bad_metric = random.choice(list(OUT_OF_RANGE))
             metrics[bad_metric] = round(random.choice(OUT_OF_RANGE[bad_metric]), 1)
+            self.last_injected = True
 
+        self.last_metrics = metrics
         return metrics
 
     # ---- V2：指令真正改变行为 ----
@@ -178,19 +380,27 @@ class DeviceState:
         now_ts = time.time()
         params = params or {}
         if action == "irrigation_on":
+            requested = params.get("duration_min")
             minutes = _minutes(params, "duration_min", 30.0)
-            self.irrigation_until = now_ts + minutes * 60.0
-            self.irrigation_rate = 0.85  # %/s，比本地自主脉冲强，采样上立即可见
+            clipped = ""
+            try:
+                if requested is not None and float(requested) > minutes:
+                    clipped = f"（请求 {float(requested):.0f} 分钟，已按上限 {MAX_EFFECT_MINUTES:.0f} 分钟执行）"
+            except (TypeError, ValueError):
+                clipped = ""
+            rate, real_seconds = self.soil.start_irrigation(now_ts, minutes)
+            dose = SIM_IRRIGATION_RATE_PCT_PER_S * 60.0 * minutes
             self.last_command = {"action": action, "params": params, "ts": iso(local_now())}
             return True, (
-                f"灌溉已开启：墒情回升速率 {self.irrigation_rate}%/s，"
-                f"持续 {minutes:.0f} 分钟（当前 drift={self.drift:.1f}）"
+                f"灌溉已开启：{SIM_IRRIGATION_RATE_PCT_PER_S}%/模拟秒 × {SIM_DEMO_ACCELERATION:.0f} 倍加速"
+                f" = {_effective_irrigation_rate():.4f}%/真实秒；持续 {minutes:.0f} 模拟分钟{clipped}"
+                f"（约 {real_seconds / 60.0:.1f} 真实分钟），预计补水 {dose:.1f} 个百分点"
+                f"（当前墒情偏移 {self.soil.drift:.1f} 点）"
             )
         if action == "irrigation_off":
-            self.irrigation_until = 0.0
-            self.irrigation_rate = 0.0
+            self.soil.stop_irrigation()
             self.last_command = {"action": action, "params": params, "ts": iso(local_now())}
-            return True, f"灌溉已关闭：停止补水（当前 drift={self.drift:.1f}）"
+            return True, f"灌溉已关闭：停止补水（当前墒情偏移 {self.soil.drift:.1f} 点）"
         if action == "pesticide_dose":
             dose = params.get("dose_ml", params.get("dose", 60))
             minutes = _minutes(params, "duration_min", 45.0)
@@ -209,15 +419,21 @@ class DeviceState:
             )
         return False, f"未知动作 {action}，模拟器未改变行为"
 
-    def payload(self, elapsed: float) -> str:
-        ts = iso(local_now())
+    def payload(self, sim_elapsed: float, real_elapsed: float | None = None,
+                now: datetime | None = None) -> str:
+        now = now or local_now()
         body = {
             "device_code": self.device_code,
             "plot_code": self.plot_code,
             "type": self.type,
-            "ts": ts,
+            "ts": iso(now),
         }
-        body.update(self.sample(elapsed))
+        body.update(self.sample(sim_elapsed, real_elapsed, now))
+        # V2.1：让前端与答辩都能说清"这是 N 倍时间压缩的演示"
+        body["sim_acceleration"] = SIM_DEMO_ACCELERATION
+        body["scenario"] = SIM_SCENARIO
+        if self.last_injected:
+            body["injected"] = True
         return json.dumps(body, ensure_ascii=False)
 
     def topic(self) -> str:
@@ -332,7 +548,8 @@ def main() -> int:
         pass
 
     device_codes = resolve_devices()
-    _states = {code: DeviceState(code) for code in device_codes}
+    scenario = Scenario(SIM_SCENARIO, SIM_DEMO_ACCELERATION)
+    _states = {code: DeviceState(code, scenario) for code in device_codes}
     states = _states
 
     # V2：气象按地块发布（地块集合来自所选设备）
@@ -342,6 +559,11 @@ def main() -> int:
     print(
         f"[simulator] 目标 {MQTT_HOST}:{MQTT_PORT}，间隔 {SIM_INTERVAL_SECONDS}s，"
         f"设备 {device_codes}，越界概率 {SIM_BAD_PROBABILITY}",
+        flush=True,
+    )
+    print(
+        f"[simulator] 灌溉速率 {SIM_IRRIGATION_RATE_PCT_PER_S}%/模拟秒 × 演示加速 {SIM_DEMO_ACCELERATION}"
+        f" = 对真实时间 {_effective_irrigation_rate():.4f}%/真实秒；场景 {SIM_SCENARIO}",
         flush=True,
     )
     print(
@@ -362,34 +584,44 @@ def main() -> int:
     last_weather = 0.0
     warned = False
     tick = 0
+    rain_by_plot: dict[str, float] = {code: 0.0 for code in plots}
     try:
         while _running:
             now = time.time()
             elapsed = max(now - last, 0.001)
             last = now
+            scenario.tick(now)
 
             if client.is_connected():
                 warned = False
+                # 气象先于遥测发布：本轮雨强喂给同地块的墒情物理
+                if WEATHER_ENABLED and now - last_weather >= WEATHER_INTERVAL_SECONDS:
+                    last_weather = now
+                    span = max(WEATHER_INTERVAL_SECONDS, 1.0)
+                    for plot_code, wstate in weather_states.items():
+                        data = wstate.sample(span)
+                        body = {"plot_code": plot_code, "ts": iso(local_now())}
+                        body.update(data)
+                        client.publish(
+                            wstate.topic(), json.dumps(body, ensure_ascii=False), qos=0, retain=False
+                        )
+                        rain_by_plot[plot_code] = float(data.get("rainfall_mm") or 0.0) / span
+                    print(
+                        f"[simulator] 已发布气象 {len(weather_states)} 条（地块 {plots}）"
+                        f" ts={iso(local_now())} 24h雨量={ {c: round(w.precip_mm_24h(), 1) for c, w in weather_states.items()} }",
+                        flush=True,
+                    )
+
+                sim_elapsed = elapsed * SIM_DEMO_ACCELERATION
                 for code, state in states.items():
-                    client.publish(state.topic(), state.payload(elapsed), qos=0, retain=False)
+                    state.set_rain_rate(rain_by_plot.get(state.plot_code, 0.0))
+                    client.publish(
+                        state.topic(), state.payload(sim_elapsed, elapsed), qos=0, retain=False
+                    )
                 tick += 1
                 if tick % 12 == 1:
                     print(
                         f"[simulator] 已发布 {tick} 轮，最新 ts={iso(local_now())}",
-                        flush=True,
-                    )
-
-                # V2：气象按自己的节奏发布（默认 30s）
-                if WEATHER_ENABLED and now - last_weather >= WEATHER_INTERVAL_SECONDS:
-                    last_weather = now
-                    for plot_code, wstate in weather_states.items():
-                        client.publish(
-                            wstate.topic(), wstate.payload(max(WEATHER_INTERVAL_SECONDS, 1.0)),
-                            qos=0, retain=False,
-                        )
-                    print(
-                        f"[simulator] 已发布气象 {len(weather_states)} 条（地块 {plots}）"
-                        f" ts={iso(local_now())}",
                         flush=True,
                     )
             elif not warned:

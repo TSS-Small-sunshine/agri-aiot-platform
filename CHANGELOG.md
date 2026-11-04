@@ -3,6 +3,32 @@
 本文件格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] - 2026-11-04
+
+本版把模拟器从「按概率随机掺脏值」的演示道具，升级为**物理规律可信、场景可复现**的沙盘；
+同时收紧告警链路的判定条件，让大屏上的每一条红色告警都能被追问、被复现。
+
+### 新增
+
+- **演示场景注入 `SIM_SCENARIO`**（`normal` / `drought` / `heat` / `disease` / `cold`，默认 `normal` 不注入）：用确定性场景替代随机脏值，同一场景每次演示表现一致，可复现、可讲解。
+- **演示时间压缩 `SIM_DEMO_ACCELERATION`**（默认 `30`）：把灌溉补水这类分钟级物理过程压缩到演示可感知的时间尺度；设 `1` 即完全真实速率。
+- **灌溉物理速率 `SIM_IRRIGATION_RATE_PCT_PER_S`**（默认 `0.008`，真实量级约 28.8 个点/小时）：**生效速率 = 该值 × `SIM_DEMO_ACCELERATION`**，默认 0.24 %/s。
+- 遥测 payload 新增 `sim_acceleration`（number，当前生效的演示加速倍率）；气象 payload 新增 `precip_mm_24h`（number，24 小时累计降雨量）。
+
+### 变更
+
+- **`SIM_BAD_PROBABILITY` 默认值 `0.12` → `0`（关闭随机脏值）**：随机越界会让演示不可复现，也不利于解释数据来源。需要随机脏值时手动设 >0，此时注入的采样会在 payload 里带 `injected: true` 标记，与真实越界可区分。
+- **湿度告警阈值放宽**：正常区间 `40~85%` → **`40~92%`**；`warning` 为 92~97% 或 <40%，`critical` 为 >97% 或 <30%。
+- **湿度告警新增前置条件**：仅当 `temperature >= 20℃` 时才判湿度告警——低温高湿（雨后夜间）是正常物理现象，此前会被误报为告警；温度缺失时不判湿度告警。
+- **新增连续越界抑制**：任何指标需最近 **3 个采样点**（按 5 秒上报即 15 秒）连续越界才告警，单点毛刺不再触发；`ALERT_COOLDOWN_SECONDS`（默认 300）保留为第二道闸。
+- `temperature`（15 / 35 / 5 / 38）与 `soil_moisture`（35 / 80 / 25）阈值**不变**。
+- 环境变量总数 **25 → 28**（新增 `SIM_IRRIGATION_RATE_PCT_PER_S` / `SIM_DEMO_ACCELERATION` / `SIM_SCENARIO` 三条，`SIM_BAD_PROBABILITY` 改默认值）。
+- **湿度阈值与告警条件同步落到契约**：`docs/CONTRACT.md` 升 v1.3（§2 环境变量 28 个、§6 阈值与两条抑制规则、§10 五条裁定），`docs/ARCHITECTURE.md` 同步。
+
+### 修复
+
+- 修正「一键演示」流程中「跑一两分钟越界点自然会在告警面板出现」的说法——`SIM_BAD_PROBABILITY` 默认关闭后该说法失效，改为显式注入 `SIM_SCENARIO=drought`（或 `heat` / `disease` / `cold`）并说明约 15 秒后出现。
+- 修正 README 环境变量表里 `APP_VERSION` 的默认值（`1.0.0` → `2.0.0`，与 `.env.example` 及后端 `/api/health` 实测一致）。
 ## [2.0.0] - 2026-11-02
 
 第二个大版本：在 V1「采集 → 存储 → 大屏 → 问答」的基础上，把系统升级为**事件驱动的决策中枢**——
@@ -34,7 +60,7 @@
 - `GET /api/command/history`：指令历史与回执状态。
 - **状态机** `dispatched` → `executed` / `failed` / `timeout`；`timeout` 由 `backend/app/main.py` 的后台扫描任务按 `COMMAND_ACK_TIMEOUT_SECONDS`（30s）标记。
 - 动作白名单 4 个：`irrigation_on` / `irrigation_off` / `pesticide_dose` / `ventilation_on`，不在白名单内直接 422。
-- 模拟器收到指令后**真实改变后续采样数值**：开滴灌把墒情回升速率设为 0.85%/秒并持续指定分钟数、施药使土温 −1.5℃ 且湿度 +4% 持续 45 分钟、通风使气温 −1.8℃ 且湿度 −6% 持续 20 分钟——所以大屏曲线**真的会动**。
+- 模拟器收到指令后**真实改变后续采样数值**：开滴灌把墒情回升速率设为 0.85%/秒并持续指定分钟数（V2.1 起该速率改为「真实速率 × 演示加速」，见 [2.1.0]）、施药使土温 −1.5℃ 且湿度 +4% 持续 45 分钟、通风使气温 −1.8℃ 且湿度 −6% 持续 20 分钟——所以大屏曲线**真的会动**。
 
 ### 新增 · 气象 Mock 与 2.5D 地块
 

@@ -61,8 +61,9 @@ Mock 降级兜底——**没有 API Key 也能完整演示**。
 **告警引擎**
 
 - temperature：正常 15~35℃，>38 或 <5 → critical，35~38 或 5~15 → warning
-- humidity：正常 40~85%，<30 或 >95 → critical，>85 或 <40 → warning
+- humidity：正常 40~92%，>97 或 <30 → critical，92~97 或 <40 → warning；且**仅当气温 ≥ 20℃ 时才判湿度告警**（低温高湿不告警，温度缺失时不判）
 - soil_moisture：正常 35~80%，<35 → warning，<25 → critical
+- 连续越界抑制：任何指标需最近 3 个采样点（15 秒）连续越界才告警，单点毛刺不告警；`ALERT_COOLDOWN_SECONDS`（默认 300）为第二道闸
 
 **大模型问答**
 
@@ -258,7 +259,7 @@ agri-aiot-platform/
 ├── docker-compose.yml            # 默认：拉 ghcr 预构建镜像
 ├── docker-compose.build.yml      # 可选：本地构建覆盖文件
 ├── .dockerignore                 # 构建上下文排除（.venv / node_modules / dist / data / .env …）
-├── .env.example                  # 全部 25 个环境变量 + 中文注释（含 V2 新增 4 个）
+├── .env.example                  # 全部 28 个环境变量 + 中文注释（含 V2 新增 4 个、V2.1 新增 3 个）
 ├── .gitignore
 ├── README.md                     # 本文件
 └── CHANGELOG.md                  # 含「技术难点与解决思路」演讲稿素材
@@ -1047,7 +1048,7 @@ docker compose exec -T backend python - --hours 24 --step-minutes 5 < scripts/se
 ```
 
 > 注意：seed 脚本**只灌遥测历史**，不写告警表。告警由模拟器实时上报触发，
-> `docker compose up -d` 后跑一两分钟，越界点自然会在告警面板出现。
+> 默认 `SIM_BAD_PROBABILITY=0`（随机脏值关闭，演示才可复现）。**想演示告警请注入场景**：
 
 ### 第 3 步：打开大屏提问
 
@@ -1245,8 +1246,9 @@ curl -s -X POST http://127.0.0.1:8000/api/command/execute \
 
 1. 后端把指令落库为 `dispatched`，返回 `command_id` / `topic` / `payload`；
 2. 向 `agri/command/{plot}/{device}` 发布 MQTT 报文，**QoS 1**；
-3. 模拟器订阅并调 `apply_command()`，**真实改变后续采样数值**——开滴灌会把墒情回升速率设为 0.85%/秒，
-   所以**几十秒后大屏上的墒情曲线真的会回升**；
+3. 模拟器订阅并调 `apply_command()`，**真实改变后续采样数值**——开滴灌按 `SIM_IRRIGATION_RATE_PCT_PER_S`（0.008%/秒，
+   真实量级）补水，再乘 `SIM_DEMO_ACCELERATION`（默认 30 倍）压到演示尺度，默认 0.24%/秒，
+   所以**30 秒左右大屏上的墒情曲线真的会回升**（约 +7 个百分点）；
 4. 模拟器向 `agri/command_ack/{plot}/{device}` 回执，后端把状态改成 `executed` 并记 `ack_at`。
 
 **状态机**：`dispatched`（已下发，等待回执）→ `executed`（已执行并回执）/ `failed`（执行失败）/
@@ -1323,13 +1325,13 @@ curl -s 'http://127.0.0.1:8000/api/shop/skus?keyword=抗旱'
 
 ## 环境变量
 
-全部 **25** 个环境变量的说明与默认值见 **[.env.example](.env.example)**（与 `docs/CONTRACT.md` 第 2 节逐字一致）。
+全部 **28** 个环境变量的说明与默认值见 **[.env.example](.env.example)**（与 `docs/CONTRACT.md` 第 2 节逐字一致）。
 所有可调参数一律走环境变量，代码零硬编码。
 
 | # | 变量 | 默认值 | 说明 |
 |---|---|---|---|
 | 1 | `APP_PORT` | `8000` | 后端 HTTP 监听端口；compose 映射为 `8000:8000` |
-| 2 | `APP_VERSION` | `1.0.0` | 版本号，出现在 `GET /api/health` 的 `version` |
+| 2 | `APP_VERSION` | `2.0.0` | 版本号，出现在 `GET /api/health` 的 `version` |
 | 3 | `DB_PATH` | `/data/agri.db` | SQLite 数据库文件路径（容器内必须指向挂载卷 `/data`） |
 | 4 | `DATA_DIR` | `/data` | 数据目录（数据库、日志等），即 `agri-data` 卷的挂载点 |
 | 5 | `MQTT_HOST` | `mosquitto` | broker 主机名；容器内用 compose 服务名 `mosquitto`，裸机改 `127.0.0.1` |
@@ -1347,16 +1349,19 @@ curl -s 'http://127.0.0.1:8000/api/shop/skus?keyword=抗旱'
 | 17 | `AI_HISTORY_LIMIT` | `50` | `GET /api/ai/history` 返回条数上限 |
 | 18 | `SIM_INTERVAL_SECONDS` | `5` | 模拟器遥测上报间隔（前端轮询同为 5s） |
 | 19 | `SIM_DEVICES` | `FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02` | 模拟设备清单，逗号分隔（须与契约第 3 节一致） |
-| 20 | `SIM_BAD_PROBABILITY` | `0.12` | 每次采样注入越界值的概率，用于演示告警链路；设 `0` 关闭 |
-| 21 | `ALERT_COOLDOWN_SECONDS` | `300` | 同 `device_code + metric + level` 的告警冷却秒数，防刷表 |
-| 22 | `RUNTIME_CONFIG_PATH` | `/data/runtime_config.json` | **V2** 配置中心落盘路径；优先级**高于环境变量**，改完即热生效 |
-| 23 | `REASONING_TIMEOUT_SECONDS` | `45` | **V2** 单次推演超时秒数（推演 Prompt 更长，故比 20 宽） |
-| 24 | `COMMAND_ACK_TIMEOUT_SECONDS` | `30` | **V2** 指令下发后等回执秒数，超时标记 `timeout` |
-| 25 | `WEATHER_INTERVAL_SECONDS` | `30` | **V2** 模拟器气象上报间隔，与 5s 遥测解耦 |
+| 20 | `SIM_IRRIGATION_RATE_PCT_PER_S` | `0.008` | **V2.1** 灌溉补水速率（%/秒），真实量级约 28.8 个点/小时 |
+| 21 | `SIM_DEMO_ACCELERATION` | `30` | **V2.1** 演示时间压缩倍率；设 `1` = 完全真实速率 |
+| 22 | `SIM_SCENARIO` | `normal` | **V2.1** 演示场景注入：normal / drought / heat / disease / cold |
+| 23 | `SIM_BAD_PROBABILITY` | `0` | **V2.1 起默认关闭**；设 >0 时注入样本带 `injected: true` 标记 |
+| 24 | `ALERT_COOLDOWN_SECONDS` | `300` | 同 `device_code + metric + level` 的告警冷却秒数，防刷表 |
+| 25 | `RUNTIME_CONFIG_PATH` | `/data/runtime_config.json` | **V2** 配置中心落盘路径；优先级**高于环境变量**，改完即热生效 |
+| 26 | `REASONING_TIMEOUT_SECONDS` | `45` | **V2** 单次推演超时秒数（推演 Prompt 更长，故比 20 宽） |
+| 27 | `COMMAND_ACK_TIMEOUT_SECONDS` | `30` | **V2** 指令下发后等回执秒数，超时标记 `timeout` |
+| 28 | `WEATHER_INTERVAL_SECONDS` | `30` | **V2** 模拟器气象上报间隔，与 5s 遥测解耦 |
 
 ```bash
 cp .env.example .env    # 然后按需修改
 ```
 
-> 另外模拟器还有一个 `SIM_WEATHER_ENABLED`（默认开启），它**不在契约第 2 节的 25 个变量里**，
+> 另外模拟器还有一个 `SIM_WEATHER_ENABLED`（默认开启），它**不在契约第 2 节的 28 个变量里**，
 > 由 `docker-compose.yml` 的 simulator 服务显式注入，用于一键关停气象上报。

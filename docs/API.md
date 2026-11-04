@@ -124,7 +124,8 @@ curl -s http://127.0.0.1:8000/api/devices
         "humidity": 68.2,
         "soil_moisture": 52.1,
         "soil_temp": 22.7,
-        "battery": 93.5
+        "battery": 93.5,
+        "sim_acceleration": 30
       }
     }
   ]
@@ -175,13 +176,16 @@ curl -s http://127.0.0.1:8000/api/telemetry/latest
       "humidity": 68.2,
       "soil_moisture": 52.1,
       "soil_temp": 22.7,
-      "battery": 93.5
+      "battery": 93.5,
+      "sim_acceleration": 30
     }
   ]
 }
 ```
 
 元素即 `/api/devices` 的 `latest` 对象，额外带 `device_code` 与 `plot_code`。
+
+> **V2.1 新增字段**：`latest` 与 `points[]` 里的遥测对象都多了 `sim_acceleration`（number，当前生效的演示加速倍率 = `SIM_IRRIGATION_RATE_PCT_PER_S × SIM_DEMO_ACCELERATION`）；模拟器上报时还会带 `scenario`（当前演示场景名），仅在设了 `SIM_SCENARIO` 时出现，`injected: true` 则只在随机脏值注入命中时出现。V2.1 之前入库的历史数据没有这些字段，读出来是 `null`。
 
 ---
 
@@ -216,7 +220,8 @@ curl -s "http://127.0.0.1:8000/api/telemetry/history?device_code=FJ-CITRUS-A01&h
       "temperature": 26.4,
       "humidity": 68.2,
       "soil_moisture": 52.1,
-      "soil_temp": 22.7
+      "soil_temp": 22.7,
+      "sim_acceleration": 30
     }
   ]
 }
@@ -227,6 +232,7 @@ curl -s "http://127.0.0.1:8000/api/telemetry/history?device_code=FJ-CITRUS-A01&h
 - `points` 按 `ts` **升序**（曲线从左到右即时间先后）。
 - 缺 `device_code` → 422（FastAPI 参数校验失败）。
 - 无数据时 `points` 为 `[]`、`count` 为 `0`，仍返回 200。
+- **V2.1**：每个点额外带 `sim_acceleration`（当前生效的演示加速倍率）。
 
 ---
 
@@ -308,6 +314,26 @@ curl -s "http://127.0.0.1:8000/api/alerts?limit=50&only_unacked=false"
 | `value` / `threshold` | number | 实测值 / 被触发的阈值 |
 | `acked` | int | `0` 未确认，`1` 已确认 |
 | `total` / `unacked` | int | 总数 / 未确认数 |
+
+**告警判定规则（V2.1 起）**
+
+后端对每个入库采样点按 `THRESHOLDS` 判定，命中才写 `alerts` 表：
+
+| 指标 | 正常区间 | 告警 |
+|---|---|---|
+| `temperature` | 15 ~ 35 ℃ | >38 或 <5 → `critical`；35~38 或 5~15 → `warning` |
+| `humidity` | 40 ~ 92 % | >97 或 <30 → `critical`；92~97 或 <40 → `warning` |
+| `soil_moisture` | 35 ~ 80 % | <35 → `warning`；<25 → `critical` |
+
+但阈值命中**不等于**告警落库，还要过三道闸门：
+
+1. **湿度前置条件**：湿度只在同时满足 `temperature >= 20℃` 时判定。低温高湿（雨后夜间 95% 湿度 + 16℃）是正常物理现象，不告警；该采样点没有温度值时同样不判湿度告警。
+2. **连续越界抑制**：任何指标都需最近 **3 个采样点**连续越界才告警。按 `SIM_INTERVAL_SECONDS=5` 即 15 秒，所以 `docker compose up -d` 后约 15 秒才会出现第一条告警，单点毛刺不再触发。
+3. **冷却窗口**：`ALERT_COOLDOWN_SECONDS`（默认 300，设 `0` 关闭）对同 `device_code + metric + level` 生效，防止同一条越界反复刷表。
+
+> 演示告警请设 `SIM_SCENARIO=drought`（或 `heat` / `disease` / `cold`）；`SIM_BAD_PROBABILITY` 自 V2.1 起默认 `0`（关闭随机脏值注入），设 >0 时注入的采样会带 `injected: true` 标记。
+>
+> 以上三道闸门与本节的阈值同属 **V2.1 冻结规则**；配套的三个环境变量见 `.env.example` 的「模拟器」段。
 
 ---
 
@@ -528,9 +554,9 @@ curl -s http://127.0.0.1:8000/api/meta
     },
     "humidity": {
       "min": 40,
-      "max": 85,
+      "max": 92,
       "critical_min": 30,
-      "critical_max": 95
+      "critical_max": 97
     },
     "soil_moisture": {
       "min": 35,
@@ -591,8 +617,10 @@ curl -s http://127.0.0.1:8000/api/meta
 | 指标 | 正常区间 | 告警 |
 |---|---|---|
 | temperature | 15 ~ 35 ℃ | >38 或 <5 → `critical`；35~38 或 5~15 → `warning` |
-| humidity | 40 ~ 85 % | >95 或 <30 → `critical`；>85 或 <40 → `warning` |
+| humidity | 40 ~ 92 % | >97 或 <30 → `critical`；92~97 或 <40 → `warning`（**仅当气温 ≥ 20℃ 时判定**） |
 | soil_moisture | 35 ~ 80 % | <35 → `warning`；<25 → `critical` |
+
+> **V2.1 两处收紧**：① 湿度告警仅在同时满足 `temperature >= 20℃` 时判定（低温高湿不告警，温度缺失时不判）；② 任何指标需最近 **3 个采样点**连续越界才告警，单点毛刺不告警。完整规则见 `GET /api/alerts` 一节。
 
 `sim_interval_seconds` 来自 `SIM_INTERVAL_SECONDS`，与前端 5000ms 轮询保持一致观感。
 
@@ -892,7 +920,7 @@ curl -s -X POST http://127.0.0.1:8000/api/reasoning/simulate \
     },
     "thresholds": {
       "temperature": { "min": 15, "max": 35, "critical_min": 5, "critical_max": 38 },
-      "humidity": { "min": 40, "max": 85, "critical_min": 30, "critical_max": 95 },
+      "humidity": { "min": 40, "max": 92, "critical_min": 30, "critical_max": 97 },
       "soil_moisture": { "min": 35, "max": 80, "critical_min": 25 }
     }
   },
@@ -1220,6 +1248,7 @@ curl -s 'http://127.0.0.1:8000/api/weather/latest?plot_code=A'
     "temperature": 26.4,
     "humidity": 68.2,
     "rainfall_mm": 0.0,
+    "precip_mm_24h": 0.0,
     "wind_dir": "东南",
     "wind_level": 2,
     "condition": "晴"
@@ -1230,6 +1259,7 @@ curl -s 'http://127.0.0.1:8000/api/weather/latest?plot_code=A'
       "temperature": 29.9,
       "humidity": 55.5,
       "rainfall_mm": 0.0,
+      "precip_mm_24h": 0.0,
       "wind_dir": "南",
       "wind_level": 2,
       "condition": "晴"
@@ -1239,6 +1269,7 @@ curl -s 'http://127.0.0.1:8000/api/weather/latest?plot_code=A'
       "temperature": 30.7,
       "humidity": 52.6,
       "rainfall_mm": 0.0,
+      "precip_mm_24h": 0.0,
       "wind_dir": "西南",
       "wind_level": 2,
       "condition": "晴"
@@ -1248,6 +1279,7 @@ curl -s 'http://127.0.0.1:8000/api/weather/latest?plot_code=A'
       "temperature": 31.2,
       "humidity": 50.8,
       "rainfall_mm": 0.0,
+      "precip_mm_24h": 0.0,
       "wind_dir": "西",
       "wind_level": 1,
       "condition": "晴"
@@ -1279,7 +1311,8 @@ curl -s 'http://127.0.0.1:8000/api/weather/latest?plot_code=A'
 |---|---|---|
 | `ts` | string | ISO8601 带时区 |
 | `temperature` / `humidity` | number \| null | 气温 ℃ / 相对湿度 % |
-| `rainfall_mm` | number \| null | 降水量 mm |
+| `rainfall_mm` | number \| null | 本时段降水量 mm |
+| `precip_mm_24h` | number \| null | **V2.1 新增**：24 小时累计降雨量 mm（有上限，见 `simulator/weather.py`） |
 | `wind_dir` | string \| null | 风向中文（北 / 东北 / … / 西北） |
 | `wind_level` | int \| null | 风力等级 |
 | `condition` | string \| null | 天气现象：`晴` / `阴` / `小雨` / `中雨` |
@@ -1379,5 +1412,7 @@ curl -s 'http://127.0.0.1:8000/api/shop/skus?keyword=抗旱'
 | `AI_HISTORY_LIMIT` | `GET /api/ai/history`（`limit` 上限） |
 | `SIM_INTERVAL_SECONDS` | `GET /api/meta` |
 | `SIM_DEVICES` | 模拟器上报的设备集合 |
-| `SIM_BAD_PROBABILITY` | 模拟器越界注入概率，决定 `GET /api/alerts` 里告警出现的频率 |
+| `SIM_IRRIGATION_RATE_PCT_PER_S` / `SIM_DEMO_ACCELERATION` | 模拟器灌溉补水速率与演示加速倍率（生效速率 = 两者相乘） |
+| `SIM_SCENARIO` | 模拟器演示场景注入（`normal` / `drought` / `heat` / `disease` / `cold`），决定 `GET /api/alerts` 里告警出现的种类 |
+| `SIM_BAD_PROBABILITY` | 模拟器随机越界注入概率，**默认 `0` 关闭**；设 >0 时注入样本带 `injected: true` |
 | `ALERT_COOLDOWN_SECONDS` | `GET /api/alerts`（同设备+指标+级别的告警冷却，防重复刷表） |
