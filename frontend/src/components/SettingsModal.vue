@@ -45,7 +45,7 @@
               spellcheck="false"
               autocomplete="off"
               :placeholder="comboPlaceholder"
-              @focus="comboOpen = true"
+              @focus="onComboFocus"
               @input="onComboInput"
               @keydown.down.prevent="move(1)"
               @keydown.up.prevent="move(-1)"
@@ -56,6 +56,7 @@
             <div v-if="comboOpen" class="combo-list" role="listbox">
               <div class="combo-item" :class="{ active: hl === 0, sel: !form.model }" @mousedown.prevent="pick('')">
                 <span class="ci-id">（不指定模型 · 后端回落 mock-agronomist，真实端点会失败并降级）</span>
+                <span v-if="!form.model" class="ci-tag">当前</span>
               </div>
               <div
                 v-for="(m, i) in filteredModels"
@@ -224,6 +225,14 @@ function pick(id) {
 
 function clearModel() {
   pick('')
+}
+
+// 聚焦时全选已填内容：否则输入框里已有模型名（预选值），用户直接打字会变成
+// 「deepseek-v4.1-flashdeepseek」这种拼接串，过滤结果为空，看起来像坏了。
+function onComboFocus(e) {
+  comboOpen.value = true
+  const el = e?.target
+  if (el && typeof el.select === 'function') el.select()
 }
 
 function onComboInput(e) {
