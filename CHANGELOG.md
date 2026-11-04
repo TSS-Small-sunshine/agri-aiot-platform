@@ -13,6 +13,7 @@
 - `GET /api/config`：返回当前**生效**配置，`api_key` **只回显掩码**（`sk-****abcd`），完整值永不返回。
 - `PUT /api/config`：写 `RUNTIME_CONFIG_PATH` 并**立即热生效**——后端每次调用都重新读文件，进程内无缓存，**无需改代码、无需重启容器**。
 - `POST /api/config/test`：用当前配置探活 `{base_url}/models`，失败也返回 200 + `ok=false` + `error`；**并额外用 1 token 的最小请求实测当前所选模型能否调用**，返回 `model_ok` / `tested_model` / `model_error`（见 [难点六](CHANGELOG.md)）。
+- 模型选择：网关常返回 200+ 个模型，原生 `<select>` 不可检索，改为**可输入过滤的组合框**（键盘 ↑↓ 可选、Esc 关闭、向量模型排末尾并打标）；已配置 Key 但未选模型时**预选第一个可用模型**，不再让「不选」等于「必然降级」。
 - `GET /api/models`：运行时模型列表（V1 的 `GET /api/ai/models` 保留为别名，两者响应完全一致）。
 - 优先级：`runtime_config.json` > 环境变量（`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`）> 内置 Mock。
 - `api_key` 三态语义：键**缺省**=保持不变、传 `""` 空串=保持不变、传 `null`=清除——前端靠它避免误清 Key。
@@ -740,6 +741,11 @@ probe_body = {"model": chosen, "messages": [{"role": "user", "content": "ping"}]
 `model_ok === false` 时显示「接口连通（74ms · 205 个模型），但所选模型 X 调用失败：… ——
 请换一个模型再保存」。未指定模型（`model_ok === null`）不报警，只说「尚未指定模型，未做调用验证」。
 
+**选择器：原生 `<select>` 换成可过滤组合框。** 网关返回 200 多个模型，原生下拉既不能检索，
+在部分内嵌浏览器里弹层还不渲染，用户原话就是「没法选择模型」。改为「输入即过滤 + 键盘可选 +
+向量模型排末尾并打标」的组合框；聚焦时全选已填内容，避免输入与预选值拼成
+「deepseek-v4.1-flashdeepseek」这种串。
+
 **默认值：不再让「不选」等于「必然降级」。** 之前未选模型时后端回落 `mock-agronomist`，
 拿这个 id 去打真实端点必然失败。现在只要 Key 已配置，前端就预选第一个非向量模型，
 并把「不指定模型」这一项如实标注为「后端回落 mock-agronomist，真实端点会失败并降级」。
@@ -753,6 +759,8 @@ probe_body = {"model": chosen, "messages": [{"role": "user", "content": "ping"}]
 | 未选模型时的行为 | 静默选 `mock-agronomist`，真实端点必然降级 | 预选第一个可用模型；仍可选默认并看到明确警告 |
 | 探活接口额外字段 | —— | `model_ok` / `tested_model` / `model_error`（未指定模型时为 `null`，不误报） |
 | 失败是否仍返回 200 | 是 | **是**（降级铁律未变，只是把原因说清楚） |
+| 模型选择方式 | 原生 `<select>`，205 项不可检索，弹层在部分内嵌浏览器不渲染 | 可输入过滤的组合框，键盘 ↑↓ 可选，向量模型排末尾并打标 |
+| 实测（生产环境） | —— | 选中已停用模型 → 红字「接口连通（65ms · 201 个模型），但所选模型 deepseek-v3.1 调用失败：HTTP 400: Model is disabled: deepseek-v3.1 —— 请换一个模型再保存」；换回可用模型 → `model_ok: true`，推演 `source: primary / degraded: false` |
 
 ### 一句话演讲口径
 
