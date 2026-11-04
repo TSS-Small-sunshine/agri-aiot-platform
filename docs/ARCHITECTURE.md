@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS telemetry (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   device_code TEXT NOT NULL, ts TEXT NOT NULL,
   temperature REAL, humidity REAL, soil_moisture REAL, soil_temp REAL,
-  battery REAL, raw TEXT);
+  co2 REAL, battery REAL, raw TEXT);
 CREATE INDEX IF NOT EXISTS idx_telemetry_device_ts ON telemetry(device_code, ts);
 CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry(ts);
 CREATE TABLE IF NOT EXISTS ai_chat (
@@ -228,6 +228,7 @@ CREATE TABLE IF NOT EXISTS skus (
 | humidity | REAL | 空气湿度 % |
 | soil_moisture | REAL | 土壤墒情 % |
 | soil_temp | REAL | 土壤温度 ℃ |
+| co2 | REAL | 棚内 CO₂ 浓度 ppm（V2.1 C-10；仅温室环境站上报，其余设备恒为 NULL） |
 | battery | REAL | 电量 %（模拟值） |
 | raw | TEXT | 原始 MQTT JSON 报文，便于回溯 |
 
@@ -354,21 +355,33 @@ CREATE TABLE IF NOT EXISTS skus (
 
 | 指标 | 正常区间 | warning | critical |
 |---|---|---|---|
-| temperature | 15~35 ℃ | 35~38 或 5~15 | > 38 或 < 5 |
+| temperature | 5~35 ℃ | 35~38 | > 38 或 < 5 |
 | humidity | 40~92 % | < 40 或 > 92 | < 30 或 > 97 |
-| soil_moisture | 35~80 % | < 35 | < 25 |
+| soil_moisture | 按质地分档（见下） | < min | < critical_min |
+| co2（仅温室） | 400~1200 ppm | < 400 或 > 1200 | < 300 或 > 1500 |
+
+`soil_moisture` 按土壤质地分档（V2.1 C-11，`SOIL_TEXTURE_THRESHOLDS`）：
+
+| 质地 | min | max | critical_min |
+|---|---|---|---|
+| 砂壤（B 区） | 28 | 80 | 20 |
+| 壤土（A 区） | 35 | 80 | 25 |
+| 黏壤 | 40 | 80 | 30 |
 
 字段取值（与源码逐字一致）：
 
-- `temperature`：`min 15.0`、`max 35.0`、`critical_min 5.0`、`critical_max 38.0`。
+- `temperature`：`min 5.0`、`max 35.0`、`critical_min 0.0`、`critical_max 38.0`（V2.1 C-12：下限由 15℃ 下修到 5℃）。
 - `humidity`：`min 40.0`、`max 92.0`、`critical_min 30.0`、`critical_max 97.0`。
-- `soil_moisture`：`min 35.0`、`max 80.0`、`critical_min 25.0`（无上限档）。
+- `soil_moisture`：无单一常量，由 `config.meta_thresholds(plot_code)` 按地块土壤质地返回（见上表）；`/api/meta` 暴露的就是生效后的值。
+- `co2`：`min 400.0`、`max 1200.0`、`critical_min 300.0`、`critical_max 1500.0`（`CO2_THRESHOLDS`，仅温室）。
 
 - **humidity 为对称双档**，不留 30~40 / 85~95 的静默带（`alerts.py` 的 `evaluate_humidity` 先判 critical 再判 warning）。
 - **设备离线判定**：`last_seen` 距今 > `DEVICE_OFFLINE_SECONDS`（默认 30 秒）即 `offline`。
 - **告警冷却**：同一 `device_code + metric + level` 在 `ALERT_COOLDOWN_SECONDS`（默认 300 秒）内不重复写表，避免 5 秒高频上报刷爆 `alerts`。
 - **连续采样抑制（V2.1 C-4）**：同一设备同一指标需最近 `ALERT_SUSTAINED_SAMPLES`（3）个采样**全部越界**才告警；单点毛刺不落库。
 - **湿度温度前置（V2.1 C-4）**：湿度告警还要求该设备最近一次气温 ≥ `HUMIDITY_ALERT_MIN_TEMPERATURE`（20℃）。福建夜间露点常年 90% 以上，不加此条件会整夜刷屏。
+- **长时高湿改判病害风险（V2.1 C-12）**：连续高湿 ≥ `HUMIDITY_RISK_MIN_HOURS`（6.0）小时**且**气温落在 `HUMIDITY_RISK_TEMP_MIN~MAX`（20~28℃）时，不再刷单点湿度告警，改出「炭疽病风险提示」；回溯窗口 `HUMIDITY_RISK_WINDOW_HOURS`（24h）有界查询。
+- **设备形态差异（V2.1 C-8）**：同一地块的环境站与墒情站各报各的指标，`config.DEVICE_METRICS` 决定绑定关系，温室环境站额外上报 `co2`。
 
 ## 四、MQTT 主题约定
 
@@ -439,6 +452,7 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 | FJ-CITRUS-A02 | A区柑橘园墒情站 | A | A区·柑橘示范园 | soil |
 | FJ-CITRUS-B01 | B区柑橘园环境站 | B | B区·柑橘试验园 | env |
 | FJ-CITRUS-B02 | B区柑橘园墒情站 | B | B区·柑橘试验园 | soil |
+| FJ-MUSH-C01 | C区温室环境站 | C | C区·闽宁协作温室菇棚 | env（+CO₂） |
 
 ## 五、REST 接口清单（共 22 条）
 
@@ -478,9 +492,9 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 
 > 源码侧：10 个 router 共 **21** 处路由装饰器，加上 `main.py` 的 3 处 —— `GET /api/health`（计入契约）与 `GET /`、`GET /{full_path:path}`（静态托管兜底，`include_in_schema=False`，不计入契约），合计 24 处装饰器、**22 条接口**。
 
-## 六、环境变量（共 28 个）
+## 六、环境变量（共 29 个）
 
-全部 28 个可调参数见仓库根 `.env.example`（含中文注释与默认值），代码只从环境变量读取，零硬编码。名称与顺序与 `.env.example` 完全一致：
+全部 29 个可调参数见仓库根 `.env.example`（含中文注释与默认值），代码只从环境变量读取，零硬编码。名称与顺序与 `.env.example` 完全一致：
 
 | # | 变量 | 默认值 | 说明 |
 |---|---|---|---|
@@ -507,11 +521,12 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 | 21 | SIM_DEMO_ACCELERATION | 30 | 演示加速倍率（1 = 完全真实时间） |
 | 22 | SIM_SCENARIO | normal | 连续演示场景：normal / drought / heat / disease / cold |
 | 23 | SIM_BAD_PROBABILITY | 0 | 单点越界脏值注入概率（默认关闭） |
-| 24 | ALERT_COOLDOWN_SECONDS | 300 | 同设备同指标同级别的告警冷却秒数 |
-| 25 | RUNTIME_CONFIG_PATH | /data/runtime_config.json | 运行时配置落盘路径（含明文 Key，已 gitignore） |
-| 26 | REASONING_TIMEOUT_SECONDS | 45 | 推演超时（比对话更宽） |
-| 27 | COMMAND_ACK_TIMEOUT_SECONDS | 30 | 指令等回执时限，超时标 timeout |
-| 28 | WEATHER_INTERVAL_SECONDS | 30 | 模拟器气象上报间隔 |
+| 24 | SIM_PACKET_LOSS | 0 | 按概率整条丢弃遥测（V2.1 C-10，演示数据缺失；建议 0.05~0.2） |
+| 25 | ALERT_COOLDOWN_SECONDS | 300 | 同设备同指标同级别的告警冷却秒数 |
+| 26 | RUNTIME_CONFIG_PATH | /data/runtime_config.json | 运行时配置落盘路径（含明文 Key，已 gitignore） |
+| 27 | REASONING_TIMEOUT_SECONDS | 45 | 推演超时（比对话更宽） |
+| 28 | COMMAND_ACK_TIMEOUT_SECONDS | 30 | 指令等回执时限，超时标 timeout |
+| 29 | WEATHER_INTERVAL_SECONDS | 30 | 模拟器气象上报间隔 |
 
 > `SIM_WEATHER_ENABLED` 不在契约的 28 个变量内：它由 `docker-compose.yml` 的 simulator 服务显式注入（源码缺省即视为开启）。
 

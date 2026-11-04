@@ -20,11 +20,19 @@ V2.1 变更（ClawsGo 审计 P0-1/P0-2/P0-4）：
 - SIM_BAD_PROBABILITY 默认改为 0（不注入）；设 >0 时仍注入单点越界，但 payload 带 injected=true；
 - 新增 SIM_SCENARIO（normal/drought/heat/disease/cold），场景是连续过程而非单点。
 
+V2.1 变更（C-10 设备形态差异化 + 数据缺失）：
+- 上报字段按设备形态裁剪：环境站只报 temperature/humidity/battery（温室菇棚站再报 co2），
+  墒情站只报 soil_moisture/soil_temp/battery，不再所有设备上报同一组字段；
+- 日周期相位按 device_code 派生，各站峰值时刻错开，不再共用同一条正弦曲线；
+- 电池衰减改为 0.02~0.06 点/小时（旧值 0.0008~0.004 点/秒 = 2.9~14.4 点/小时，一天就掉光）；
+- 新增 SIM_PACKET_LOSS：按概率整条丢弃遥测，用于演示「数据缺失」（默认 0 = 关闭）。
+
 断线自动重连；Broker 不可达时只打印重连提示，绝不退出。
 仅依赖 paho-mqtt + 标准库。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -61,7 +69,9 @@ MQTT_PORT = int(os.getenv("MQTT_PORT") or 1883)
 SIM_INTERVAL_SECONDS = _env_float("SIM_INTERVAL_SECONDS", 5.0)
 # V2.1 C-5：默认 0，不再默认注入单点越界（旧默认 0.12 会污染 summary 的 min/max）
 SIM_BAD_PROBABILITY = _env_float("SIM_BAD_PROBABILITY", 0.0)
-SIM_DEVICES_RAW = os.getenv("SIM_DEVICES") or "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02"
+# V2.1 C-10：按概率整条丢弃遥测（0~1），演示「数据缺失」；默认 0 = 关闭
+SIM_PACKET_LOSS = _env_float("SIM_PACKET_LOSS", 0.0)
+SIM_DEVICES_RAW = os.getenv("SIM_DEVICES") or "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02,FJ-MUSH-C01"
 TOPIC_TEMPLATE = os.getenv("MQTT_TOPIC_TEMPLATE") or "agri/telemetry/{plot_code}/{device_code}"
 # V2：气象发布间隔与下行指令主题（与后端 config.py 同源）
 WEATHER_INTERVAL_SECONDS = _env_float("WEATHER_INTERVAL_SECONDS", 30.0)
@@ -84,10 +94,11 @@ if SIM_SCENARIO not in SCENARIO_NAMES:
 
 # 设备清单（契约第 3 节，与后端种子数据一致）
 DEVICE_CATALOG = {
-    "FJ-CITRUS-A01": {"name": "A区柑橘园环境站", "plot_code": "A", "type": "env"},
-    "FJ-CITRUS-A02": {"name": "A区柑橘园墒情站", "plot_code": "A", "type": "soil"},
-    "FJ-CITRUS-B01": {"name": "B区柑橘园环境站", "plot_code": "B", "type": "env"},
-    "FJ-CITRUS-B02": {"name": "B区柑橘园墒情站", "plot_code": "B", "type": "soil"},
+    "FJ-CITRUS-A01": {"name": "A区柑橘园环境站", "plot_code": "A", "type": "env", "scenario": "open_field"},
+    "FJ-CITRUS-A02": {"name": "A区柑橘园墒情站", "plot_code": "A", "type": "soil", "scenario": "open_field"},
+    "FJ-CITRUS-B01": {"name": "B区柑橘园环境站", "plot_code": "B", "type": "env", "scenario": "open_field"},
+    "FJ-CITRUS-B02": {"name": "B区柑橘园墒情站", "plot_code": "B", "type": "soil", "scenario": "open_field"},
+    "FJ-MUSH-C01": {"name": "C区温室环境站", "plot_code": "C", "type": "env", "scenario": "greenhouse"},
 }
 
 # 每台设备的基线，制造地块间差异
@@ -96,6 +107,8 @@ BASELINE = {
     "FJ-CITRUS-A02": {"temperature": 25.0, "humidity": 68.0, "soil_moisture": 52.0, "soil_temp": 22.5, "battery": 91.0},
     "FJ-CITRUS-B01": {"temperature": 26.5, "humidity": 66.0, "soil_moisture": 61.0, "soil_temp": 24.0, "battery": 88.0},
     "FJ-CITRUS-B02": {"temperature": 26.0, "humidity": 64.0, "soil_moisture": 47.0, "soil_temp": 23.5, "battery": 85.0},
+    # V2.1 C-7：闽宁协作 C 区温室菇棚（香菇出菇期 18℃ / 88% / CO₂ 820ppm）
+    "FJ-MUSH-C01": {"temperature": 18.5, "humidity": 88.0, "soil_moisture": 62.0, "soil_temp": 17.0, "battery": 97.0, "co2": 820.0},
 }
 
 # 越界注入的候选：与契约第 6 节 v1.1 阈值对齐，保证一定能触发告警。
@@ -108,9 +121,9 @@ OUT_OF_RANGE = {
 }
 
 # 指令可改变行为的时长上限（分钟），防止异常 params 让设备长期跑偏。
-# 取值必须 ≥ knowledge.py 的灌溉时长上限（240），否则后端算出的指令会被静默截断，
+# 取值必须 ≥ knowledge.py 的灌溉时长上限（V2.1 C-6 已提到 1440），否则后端算出的指令会被静默截断，
 # 回执里"预计补水"与实际生效时长就对不上了（V2.1 复核修）。
-MAX_EFFECT_MINUTES = 240.0
+MAX_EFFECT_MINUTES = 1440.0
 
 # V2.1 C-2：蒸散口径 —— 日失水 3~6 点（0.125~0.25 点/小时），无雨无灌溉时适用
 ET_BASE_PCT_PER_H = 0.19
@@ -151,6 +164,16 @@ def _minutes(params: dict, key: str, default: float) -> float:
 def _effective_irrigation_rate() -> float:
     """生效灌溉速率（%/真实秒）= 真实速率 × 演示加速。"""
     return SIM_IRRIGATION_RATE_PCT_PER_S * SIM_DEMO_ACCELERATION
+
+
+def _device_phase_hours(device_code: str) -> float:
+    """V2.1 C-10：由 device_code 派生日周期相位（小时，0~24）。
+
+    哈希取模映射到 0~360 度，再按 15 度/小时折算成小时偏移，
+    使各站温度/湿度峰值时刻错开，看起来像微气候不同的独立站点。
+    """
+    digest = hashlib.md5(device_code.encode("utf-8")).hexdigest()
+    return (int(digest[:8], 16) % 360) / 15.0
 
 
 class Scenario:
@@ -288,10 +311,14 @@ class DeviceState:
 
     def __init__(self, device_code: str, scenario: Scenario | None = None):
         self.device_code = device_code
+        catalog = DEVICE_CATALOG.get(device_code, {})
         base = BASELINE.get(device_code, BASELINE["FJ-CITRUS-A01"])
-        self.plot_code = DEVICE_CATALOG.get(device_code, {}).get("plot_code", "A")
-        self.type = DEVICE_CATALOG.get(device_code, {}).get("type", "env")
+        self.plot_code = catalog.get("plot_code", "A")
+        self.type = catalog.get("type", "env")
+        # V2.1 C-10：设备形态（露天地块 / 温室）决定是否上报 co2
+        self.scenario_kind = catalog.get("scenario", "open_field")
         self.base = dict(base)
+        self.phase_hours = _device_phase_hours(device_code)
         self.scenario = scenario or Scenario("normal", SIM_DEMO_ACCELERATION)
         self.soil = SoilPhysics(base["soil_moisture"])
         self.battery = base["battery"]
@@ -306,9 +333,11 @@ class DeviceState:
 
     # ---- 物理量生成 ----
     def _daily(self, amplitude: float, peak_hour: float, now: datetime) -> float:
-        """日周期正弦：峰值出现在 peak_hour 左右。"""
+        """日周期正弦：峰值出现在 peak_hour 左右，再叠加本机相位偏移。"""
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
-        return amplitude * math.cos(2 * math.pi * (hour - peak_hour) / 24.0)
+        return amplitude * math.cos(
+            2 * math.pi * (hour - peak_hour - self.phase_hours) / 24.0
+        )
 
     def set_rain_rate(self, mm_per_s: float) -> None:
         """由气象状态喂入当前雨强（mm/s）。"""
@@ -354,22 +383,40 @@ class DeviceState:
             self.soil.drift += (target - current) * 0.35
         soil_moisture = self.soil.value(elapsed)
 
-        self.battery = max(5.0, self.battery - random.uniform(0.0008, 0.004) * max(real_elapsed, 1.0))
+        # V2.1 C-10：电池按真实小时衰减 0.02~0.06 点/小时（24h 掉 0.5~1.5 点）
+        self.battery = max(
+            5.0, self.battery - random.uniform(0.02, 0.06) * (real_elapsed / 3600.0)
+        )
 
-        metrics = {
-            "temperature": round(temperature, 1),
-            "humidity": round(humidity, 1),
-            "soil_moisture": round(max(SOIL_MOISTURE_FLOOR, min(SOIL_MOISTURE_CEIL, soil_moisture)), 1),
-            "soil_temp": round(soil_temp, 1),
-            "battery": round(self.battery, 1),
-        }
+        # V2.1 C-10：上报字段按设备形态裁剪，不再所有设备同一组指标
+        metrics: dict[str, float] = {"battery": round(self.battery, 1)}
+        if self.type == "soil":
+            metrics["soil_moisture"] = round(
+                max(SOIL_MOISTURE_FLOOR, min(SOIL_MOISTURE_CEIL, soil_moisture)), 1
+            )
+            metrics["soil_temp"] = round(soil_temp, 1)
+        else:
+            metrics["temperature"] = round(temperature, 1)
+            metrics["humidity"] = round(humidity, 1)
+            if self.scenario_kind == "greenhouse":
+                # 温室菇棚：夜间呼吸 + 通风降 CO₂
+                co2 = (
+                    self.base.get("co2", 800.0)
+                    + self._daily(140.0, 6.0, now)
+                    + random.gauss(0, 18.0)
+                )
+                if now_ts < self.ventilation_until:
+                    co2 -= 220.0
+                metrics["co2"] = round(max(300.0, min(2000.0, co2)), 1)
 
         # V2.1 C-5：默认不注入（SIM_BAD_PROBABILITY=0）；显式开启时打标记便于区分
         self.last_injected = False
         if SIM_BAD_PROBABILITY > 0 and random.random() < SIM_BAD_PROBABILITY:
-            bad_metric = random.choice(list(OUT_OF_RANGE))
-            metrics[bad_metric] = round(random.choice(OUT_OF_RANGE[bad_metric]), 1)
-            self.last_injected = True
+            candidates = [name for name in OUT_OF_RANGE if name in metrics]
+            if candidates:
+                bad_metric = random.choice(candidates)
+                metrics[bad_metric] = round(random.choice(OUT_OF_RANGE[bad_metric]), 1)
+                self.last_injected = True
 
         self.last_metrics = metrics
         return metrics
@@ -558,7 +605,7 @@ def main() -> int:
 
     print(
         f"[simulator] 目标 {MQTT_HOST}:{MQTT_PORT}，间隔 {SIM_INTERVAL_SECONDS}s，"
-        f"设备 {device_codes}，越界概率 {SIM_BAD_PROBABILITY}",
+        f"设备 {device_codes}，越界概率 {SIM_BAD_PROBABILITY}，丢包概率 {SIM_PACKET_LOSS}",
         flush=True,
     )
     print(
@@ -584,6 +631,7 @@ def main() -> int:
     last_weather = 0.0
     warned = False
     tick = 0
+    dropped = 0
     rain_by_plot: dict[str, float] = {code: 0.0 for code in plots}
     try:
         while _running:
@@ -615,13 +663,18 @@ def main() -> int:
                 sim_elapsed = elapsed * SIM_DEMO_ACCELERATION
                 for code, state in states.items():
                     state.set_rain_rate(rain_by_plot.get(state.plot_code, 0.0))
+                    # V2.1 C-10：按概率整条丢弃，演示「数据缺失」（默认 0 = 不丢）
+                    if SIM_PACKET_LOSS > 0 and random.random() < SIM_PACKET_LOSS:
+                        dropped += 1
+                        continue
                     client.publish(
                         state.topic(), state.payload(sim_elapsed, elapsed), qos=0, retain=False
                     )
                 tick += 1
                 if tick % 12 == 1:
                     print(
-                        f"[simulator] 已发布 {tick} 轮，最新 ts={iso(local_now())}",
+                        f"[simulator] 已发布 {tick} 轮，最新 ts={iso(local_now())}"
+                        f"，累计丢弃 {dropped} 条",
                         flush=True,
                     )
             elif not warned:

@@ -38,6 +38,8 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+// 指标中文名统一取自 metrics.js，新增指标（co2）只需在注册表登记一次
+import { metricLabel as labelOf } from '../metrics'
 
 const props = defineProps({
   alerts: { type: Array, default: () => [] },
@@ -49,8 +51,7 @@ const emit = defineEmits(['ack'])
 const ackingId = ref(null)
 const unackedCount = computed(() => props.alerts.filter((a) => !a.acked).length)
 
-const METRIC_LABEL = { temperature: '温度', humidity: '湿度', soil_moisture: '土壤墒情' }
-const metricLabel = (m) => METRIC_LABEL[m] || m
+const metricLabel = (m) => labelOf(m)
 const fmt = (v) => (v === null || v === undefined ? '--' : Number(v).toFixed(1))
 const shortTs = (ts) => {
   if (!ts) return '--'

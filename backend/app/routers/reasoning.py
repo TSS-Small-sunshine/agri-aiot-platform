@@ -3,14 +3,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from .. import reasoning, schemas
+from .. import config, reasoning, schemas
 
 router = APIRouter(prefix="/api/reasoning", tags=["reasoning"])
 
 
 @router.post("/simulate", response_model=schemas.ReasoningResponse)
 async def post_simulate(payload: schemas.ReasoningSimulateRequest) -> schemas.ReasoningResponse:
-    """真实大模型推演；无 Key/超时/非 JSON/Schema 失败一律降级，**永不 5xx**。"""
+    """真实大模型推演；无 Key/超时/非 JSON/Schema 失败一律降级，**永不 5xx**。
+
+    V2.1 C-9：未知地块直接 404，不再拿编造的地块参数产出一份看起来合理的结论。
+    """
+    if payload.plot_code not in config.PLOT_BY_CODE:
+        raise HTTPException(status_code=404, detail="plot not found")
     result = await reasoning.simulate(payload.plot_code, payload.node_id)
     return schemas.ReasoningResponse(**result)
 

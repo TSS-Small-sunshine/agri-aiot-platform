@@ -58,11 +58,11 @@
                 <b>{{ p.name }}</b>
                 <span class="mono ms-plot-code">{{ p.plot_code }} · {{ p.crop }}</span>
               </div>
+              <!-- 指标按地块 metrics 渲染：C 区菇棚是棚温·湿度·CO₂，不会出现「墒情 --」 -->
               <div class="ms-metrics">
-                <span class="ms-metric"><i>温度</i><b class="mono">{{ num(p.temperature) }}℃</b></span>
-                <span class="ms-metric"><i>湿度</i><b class="mono">{{ num(p.humidity) }}%</b></span>
-                <span class="ms-metric"><i>墒情</i><b class="mono">{{ num(p.soil_moisture) }}%</b></span>
-                <span class="ms-metric"><i>土温</i><b class="mono">{{ num(p.soil_temp) }}℃</b></span>
+                <span v-for="m in p.metrics" :key="m" class="ms-metric">
+                  <i>{{ metricLabel(m) }}</i><b class="mono">{{ num(p[m]) }}{{ metricUnit(m) }}</b>
+                </span>
                 <span class="ms-metric"><i>电量</i><b class="mono">{{ num(p.battery) }}%</b></span>
               </div>
               <p class="ms-plot-foot mono">在线 {{ p.online }}/{{ p.devices }} · 数据时间 {{ shortTs(p.ts) }}</p>
@@ -100,6 +100,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ackAlert, aiChat, getAlerts, getDevices, getMeta, getLatest } from '../api'
 import { ALERT_LIMIT, POLL_INTERVAL_MS } from '../config'
+import { metricLabel as labelOf, metricUnit } from '../metrics'
 import { chatTag } from '../sourceLabel'
 import { navigate } from '../router'
 
@@ -126,8 +127,8 @@ let clockTimer = null
 
 const sessionId = `mob-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
-const METRIC_LABEL = { temperature: '温度', humidity: '湿度', soil_moisture: '土壤墒情' }
-const metricLabel = (m) => METRIC_LABEL[m] || m
+// 指标中文名与单位统一取自 metrics.js 注册表，C 区 co2 也有中文名
+const metricLabel = (m) => labelOf(m)
 const num = (v) => (v === null || v === undefined ? '--' : Number(v).toFixed(1))
 
 function shortTs(ts) {
@@ -145,26 +146,29 @@ const diseaseTag = computed(() => chatTag(diseaseMsg.value || {}))
 
 // 地块卡片：plots（/api/meta）+ devices（/api/devices）+ 最新遥测（/api/telemetry/latest）
 const plotCards = computed(() => {
-  const byCode = new Map()
-  for (const l of latest.value) {
-    if (l?.device_code && !byCode.has(l.plot_code)) byCode.set(l.plot_code, l)
-  }
   return (meta.value?.plots || []).map((p) => {
     const mine = devices.value.filter((d) => d.plot_code === p.plot_code)
-    const first = byCode.get(p.plot_code) || {}
-    return {
+    // 该地块的全部最新遥测（多台设备）：逐指标取第一个非空值
+    const rows = latest.value.filter((l) => l.plot_code === p.plot_code)
+    const first = rows[0] || {}
+    const pick = (m) => {
+      const hit = rows.find((r) => r[m] !== null && r[m] !== undefined)
+      return hit ? hit[m] : null
+    }
+    // 该地块生效指标：优先 /api/meta 的 metrics，缺失时按已有数据兜底
+    const declared = Array.isArray(p.metrics) && p.metrics.length ? p.metrics : ['temperature', 'humidity']
+    const row = {
       plot_code: p.plot_code,
       name: p.name || p.plot_name,
       crop: p.crop || '--',
+      metrics: declared,
       devices: mine.length,
       online: mine.filter((d) => d.status === 'online').length,
       ts: first.ts,
-      temperature: first.temperature,
-      humidity: first.humidity,
-      soil_moisture: first.soil_moisture,
-      soil_temp: first.soil_temp,
       battery: first.battery
     }
+    for (const m of declared) row[m] = pick(m)
+    return row
   })
 })
 

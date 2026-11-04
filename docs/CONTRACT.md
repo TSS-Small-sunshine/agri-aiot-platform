@@ -1,4 +1,4 @@
-# 接口契约（冻结版 v1，V2.0 增量见 §9，V2.1 增量见 §10）—— 三路开发必须严格遵守
+# 接口契约（冻结版 v1，V2.0 增量见 §9，V2.1 第一步见 §10，V2.1 第二步见 §11）—— 三路开发必须严格遵守
 
 > 本文件是并行开发的唯一接口真相。任何一方不得单方面修改；如需变更，先改本文件。
 
@@ -35,11 +35,12 @@ OPENAI_TIMEOUT_SECONDS=20
 OPENAI_MAX_RETRIES=1
 AI_HISTORY_LIMIT=50
 SIM_INTERVAL_SECONDS=5
-SIM_DEVICES=FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02
+SIM_DEVICES=FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02,FJ-MUSH-C01
 SIM_IRRIGATION_RATE_PCT_PER_S=0.008
 SIM_DEMO_ACCELERATION=30
 SIM_SCENARIO=normal
 SIM_BAD_PROBABILITY=0
+SIM_PACKET_LOSS=0
 ALERT_COOLDOWN_SECONDS=300
 RUNTIME_CONFIG_PATH=/data/runtime_config.json
 REASONING_TIMEOUT_SECONDS=45
@@ -57,7 +58,7 @@ WEATHER_INTERVAL_SECONDS=30
 >
 > 配置优先级（三者取第一个有值的）：`runtime_config.json` > 环境变量 > 内置 Mock。无任何 Key 时 AI 与推演均降级为本地规则库，HTTP 仍 200。
 >
-> 契约修订 v1.3（V2.1，共 28 个变量）：
+> 契约修订 v1.3（V2.1 第一步，当时 28 个变量）：
 > - `SIM_IRRIGATION_RATE_PCT_PER_S`：滴灌**真实**速率（%/秒），默认 0.008（≈28.8 点/小时）。后端 `knowledge.py` 与模拟器共用该常量。
 > - `SIM_DEMO_ACCELERATION`：演示加速倍率，默认 30（设 1 = 完全真实时间）。生效速率 = 上者 × 本值。
 > - `SIM_SCENARIO`：连续演示场景，`normal`(默认) | `drought` | `heat` | `disease` | `cold`。
@@ -79,6 +80,7 @@ WEATHER_INTERVAL_SECONDS=30
   | FJ-CITRUS-A02 | A区柑橘园墒情站 | A | A区·柑橘示范园 | soil |
   | FJ-CITRUS-B01 | B区柑橘园环境站 | B | B区·柑橘试验园 | env |
   | FJ-CITRUS-B02 | B区柑橘园墒情站 | B | B区·柑橘试验园 | soil |
+| FJ-MUSH-C01 | C区温室环境站 | C | C区·闽宁协作温室菇棚 | env（+CO₂） |
 
 ## 4. 数据库 DDL（SQLite，启动时幂等建表；PRAGMA journal_mode=WAL）
 ```sql
@@ -131,9 +133,9 @@ item：
 
 **GET /api/telemetry/latest** → `{"items":[ <同 devices 的 latest 对象，额外含 device_code, plot_code> ]}`
 
-**GET /api/telemetry/history** query: `device_code`(必填), `hours`(默认 1，上限 HISTORY_HOURS_MAX), `limit`(默认 720，上限 5000)
+**GET /api/telemetry/history** query: `device_code`(必填), `hours`(默认 1，上限 HISTORY_HOURS_MAX), `limit`(默认 720，上限 5000), `metric`(可选，逗号分隔的列名白名单；V2.1 §11.2)
 → `{"device_code":"...","hours":1,"count":120,"points":[{"ts":"...","temperature":26.4,"humidity":68.2,"soil_moisture":52.1,"soil_temp":22.7}]}`
-points 按 ts 升序。
+points 按 ts 升序。`metric` 只允许收窄到 `_HISTORY_METRICS` 白名单内的列（ts 恒在），未命中白名单的列一律不返回；非温室设备的 `co2` 恒为 null（V2.1 §11.1）。
 
 **GET /api/telemetry/summary** query: `hours`(默认 24)
 → `{"hours":24,"samples":1440,
@@ -159,14 +161,18 @@ items 按 created_at 降序。
 **GET /api/ai/history** query: `limit`(默认 20，上限 AI_HISTORY_LIMIT)
 → `{"total":37,"items":[{"id":7,"question":"...","answer":"...","model":"...","degraded":0,"latency_ms":1200,"created_at":"..."}]}` 降序。
 
-**GET /api/meta** → `{"plots":[{"plot_code":"A","plot_name":"A区·柑橘示范园","devices":["FJ-CITRUS-A01","FJ-CITRUS-A02"]}],"thresholds":{"temperature":{"min":15,"max":35,"critical_min":5,"critical_max":38},"humidity":{"min":40,"max":92,"critical_min":30,"critical_max":97},"soil_moisture":{"min":35,"max":80,"critical_min":25}},"sim_interval_seconds":5}`
+**GET /api/meta** → `{"plots":[{"plot_code":"A","plot_name":"A区·柑橘示范园","devices":["FJ-CITRUS-A01","FJ-CITRUS-A02"]}],"thresholds":{"temperature":{"min":5,"max":35,"critical_min":0,"critical_max":38},"humidity":{"min":40,"max":92,"critical_min":30,"critical_max":97},"soil_moisture":{"min":35,"max":80,"critical_min":25},"co2":{"min":400,"max":1200,"critical_min":300,"critical_max":1500}},"sim_interval_seconds":5}
+> V2.1 §11：该接口按**超集**验收（§9.4 已裁定）。`thresholds.soil_moisture` 是**按地块土壤质地分档后实际生效**的值（A 壤土 35 / B 砂壤 28 / C 无墒情段）；`co2` 段只在有温室设备的地块出现；`plots[]` 另增 `name/crop/area_mu/stage/col/row/scenario/soil_texture/metrics/thresholds`。`
 
 ## 6. 告警阈值（config.py 常量，同时经 /api/meta 暴露给前端）
-- temperature：正常 15~35℃；>38 或 <5 → critical；35~38 或 5~15 → warning
+- temperature：正常 **5~35℃**；>38 或 <5 → critical；35~38 → warning（V2.1 §11.5：下限由 15℃ 下修到 5℃）
 - humidity：正常 40~92%；<40 或 >92 → warning；<30 或 >97 → critical（消除原 30~40 / 85~95 的静默带）
   - **V2.1 抑制规则 C-4**：湿度告警必须同时满足 ① 同一设备最近 `ALERT_SUSTAINED_SAMPLES`(3) 个采样全部越界，② 该设备最近一次气温 ≥ `HUMIDITY_ALERT_MIN_TEMPERATURE`(20℃)。福建夜间露点高，单点高湿是常态，不抑制会天天刷屏。
+  - **V2.1 §11.3 长时高湿改判病害风险**：连续高湿 ≥ `HUMIDITY_RISK_MIN_HOURS`(6.0) 小时**且**气温落在 `20~28℃` 时，不再刷单点湿度告警，改出「炭疽病风险提示」（回溯窗口 `HUMIDITY_RISK_WINDOW_HOURS`=24h 有界查询）。单点/短时高湿按 C-4 抑制。
   - 连续计数规则对 temperature / soil_moisture 同样生效（同一设备、同一指标）。
 - soil_moisture：正常 35~80%；<35 → warning；<25 → critical
+  - **V2.1 §11.4 按土壤质地分档**（`SOIL_TEXTURE_THRESHOLDS`）：砂壤 `28/80/20`、壤土 `35/80/25`、黏壤 `40/80/30`；地块未标注质地时取 `DEFAULT_SOIL_TEXTURE`（壤土）。`/api/meta` 暴露的是该地块**生效后**的值。
+- co2（仅温室）：正常 400~1200 ppm；>1200 或 <400 → warning；>1500 或 <300 → critical（V2.1 §11.1）
 
 ## 7. 前端约束
 - 静态构建产物输出到 `frontend/dist`（`vite.config.js` 的 `build.outDir`，**不要**直接写进 backend/，避免并行开发互相踩）
@@ -254,4 +260,63 @@ AC8 要求 V1 接口逐字段不变，但 `/api/meta` 被 V2_PLAN §6 明确列�
 - payload 新增 `sim_acceleration` 与 `scenario` 两个字段（增量，不破坏 V1 字段）。
 
 ### 10.6 实现边界（不在本次修订内）
-清单中属"农学口径与推演模型"的条目（`_soil_device` 忽略 plot_code、露天园出现 `ventilation_on`、炭疽病配杀螨剂、`POWER_KWH_PER_MU` 与灌溉时长无关、减产率在阈值处跳变、未知 plot_code 编造默认值、四台设备形态无差别、南平种沃柑/沙糖桔）**留待 V2.1 第二步**处理，本文件届时再补 §11。
+清单中属"农学口径与推演模型"的条目**已于 V2.1 第二步全部处理**，逐条结论见 §11。
+
+## 11. V2.1 第二步契约修订记录（调度方裁定，2026-11-04）
+
+第一步交付后，调度方对 `01_数据与模拟改进清单.md` 中「农学口径与推演模型」的剩余条目逐条核实，
+并结合 `scripts/seed_history.py` 不支持 C 区与 co2 的缺陷，冻结以下 12 项。**全部已落到源码并通过端到端复验。**
+
+### 11.1 C-10 温室 CO₂ 全链路
+- 新增设备 `FJ-MUSH-C01`（C区温室环境站，C 区·闽宁协作温室菇棚，香菇，1.2 亩，出菇期）。
+- `telemetry` 表新增列 `co2 REAL`；老库由 `db.py:_ensure_columns()` 用 `PRAGMA table_info` 检查后 `ALTER TABLE` 幂等补列（L178-188）。
+- `config.DEVICE_METRICS`（env→temperature,humidity；soil→soil_moisture,soil_temp）+ `GREENHOUSE_EXTRA_METRICS=("co2",)`：**同地块两类设备各报各的指标，绝不混算**。
+- `GET /api/telemetry/history` 增可选 `metric` 参数（见 §5）；`/api/telemetry/summary` 增 `co2` 段（仅当窗口内有 co2 采样）。
+- 非温室设备的 co2 恒为 null（不是 0），前端据此隐藏 CO₂ 卡。
+
+### 11.2 设备形态差异化（C-8）
+`FJ-CITRUS-A01`=[temperature,humidity,battery]、`FJ-CITRUS-A02`=[soil_moisture,soil_temp,battery]、
+`FJ-CITRUS-B01`=[temperature,humidity,battery]、`FJ-CITRUS-B02`=[soil_moisture,soil_temp,battery]、
+`FJ-MUSH-C01`=[temperature,humidity,co2,battery]。`/api/devices` 的 `latest` 会带 null 列，消费方必须过滤 null。
+
+### 11.3 湿度告警升级为长时病害风险（C-12）
+见 §6 第三条抑制规则。`HUMIDITY_RISK_MIN_HOURS=6.0`、`HUMIDITY_RISK_TEMP_MIN=20.0`、`HUMIDITY_RISK_TEMP_MAX=28.0`、
+`HUMIDITY_RISK_WINDOW_HOURS=24.0`。炭疽病处置由「施药 60ml」改为**风险提示 + 48h 内喷施保护性杀菌剂**，剂量不写死。
+
+### 11.4 墒情阈值按土壤质地分档（C-11）
+`SOIL_TEXTURE_THRESHOLDS`：砂壤 `{28,80,20}`、壤土 `{35,80,25}`、黏壤 `{40,80,30}`；`DEFAULT_SOIL_TEXTURE="壤土"`。
+地块在 `config.PLOTS` 里标注 `soil_texture`（A 壤土 / B 砂壤 / C 无墒情设备）。`/api/meta` 与 `knowledge.py` 取同一函数 `config.meta_thresholds(plot_code)`。
+
+### 11.5 温度下限 15℃ → 5℃（C-12）
+`THRESHOLDS["temperature"]` 变为 `{min 5.0, max 35.0, critical_min 0.0, critical_max 38.0}`。柑橘低温胁迫阈值是 5℃，0℃ 以下才是冻害 critical。
+
+### 11.6 耗电口径改为每立方米（C-6）
+废弃 `POWER_KWH_PER_MU`（按亩均拍脑袋，与灌溉时长无关）。改为水量平衡：
+根层湿润区亏缺水量 → 系统流量 → 时长 → 耗电，常量 `KWH_PER_M3=0.15`（低扬程滴灌合理区间 0.12~0.18）。
+`IRRIGATION_MAX_MINUTES=1440`（24h 上限）。`knowledge.py` 与 `simulator/mock_sensor.py` **共用同一常量**，误差 ≤ 1 点。
+
+### 11.7 减产率连续化（C-11）
+废弃「低于下限即 15% 下限」的跳变。改为 `severity = depth^1.5 × duration_factor`，`loss = YIELD_LOSS_MAX_PCT × severity`，
+无 15% 下限；`duration_factor` 分母由 24h 改为 **72h**（`knowledge.py:53`）；墒情达正常下限即 0。
+
+### 11.8 露天园不再出通风方案（C-11）
+`ventilation_on` 只在 `scenario == "greenhouse"` 时产出；露天园高温改滴灌降温 / 树盘覆盖。
+C 区温室菇棚兜底动作是「通风换气 15 分钟」（棚内不做墒情灌溉决策）。
+
+### 11.9 未知地块/设备不再编造默认值（C-9）
+`knowledge`/`reasoning` 对未知 `plot_code` 返回 `None` 或抛错，由路由层转成 **404** `{"detail":"plot not found"}`；
+未知 `device_code` → **422** `{"detail":"device not found"}`。绝不对不存在的对象「假装下发成功」。
+
+### 11.10 物候期按当前月份推导（C-7）
+地块不再写死 `stage`，改为 `stage_cycle` 六段窗口 + `config.stage_for(plot_code)` 按 `MM-DD` 推导；
+`stage_window` 标记该地块当季窗口。品种按产地据实：A 柑橘(芦柑)、B 柑橘(南丰蜜桔)、C 香菇；**旧稿的沃柑/沙糖桔与福建南平产地不符，已删**。
+
+### 11.11 数据缺失演示（C-10）
+新增 `SIM_PACKET_LOSS`（默认 `0`，建议演示值 0.05~0.2）：按概率**整条丢弃**遥测，前端曲线出现断点。
+与 `SIM_BAD_PROBABILITY`（单点越界，默认 0）语义不同，二者互不替代。环境变量总数 **28 → 29**。
+
+### 11.12 `scripts/seed_history.py` 支持 C 区与 co2（调度方修复）
+原脚本 `BASELINE` 只含 4 台柑橘设备且每台固定写 5 列 → C 区从未进历史、co2 列恒 NULL，且环境站在历史里带了 soil_moisture。
+现按设备真实形态拆键：A01/B01 只写 temperature+humidity+battery，A02/B02 只写 soil_moisture+soil_temp+battery，
+`FJ-MUSH-C01` 写 temperature+humidity+**co2**+battery；co2 走日周期（夜间高、午后低）；
+`--bad-probability` 缺省取 `config.SIM_BAD_PROBABILITY`（不再是硬编码 0.03）。实测 `--hours 6 --step-minutes 30` → 65 行 / 5 台设备各 13 点 / C01 co2=13。

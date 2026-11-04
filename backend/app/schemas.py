@@ -57,6 +57,8 @@ class LatestTelemetry(BaseModel):
     soil_moisture: float | None = None
     soil_temp: float | None = None
     battery: float | None = None
+    # V2.1 C-10：温室环境站上报 CO2（ppm）。非温室设备恒为 null，只增不改。
+    co2: float | None = None
 
 
 class DeviceItem(BaseModel):
@@ -93,6 +95,8 @@ class HistoryPoint(BaseModel):
     humidity: float | None = None
     soil_moisture: float | None = None
     soil_temp: float | None = None
+    # V2.1 C-10：温室 CO2 折线（非温室设备恒为 null）。
+    co2: float | None = None
 
 
 class TelemetryHistoryResponse(BaseModel):
@@ -114,6 +118,8 @@ class TelemetrySummaryResponse(BaseModel):
     temperature: StatBlock
     humidity: StatBlock
     soil_moisture: StatBlock
+    # V2.1 C-10：无 CO2 数据时为 null（非温室场景）。只增不改。
+    co2: StatBlock | None = None
 
 
 # ---------------- 告警 ----------------
@@ -201,6 +207,14 @@ class MetaPlot(BaseModel):
     stage: str | None = None
     col: int | None = None
     row: int | None = None
+    # ---- V2.1 扩展（C-7/C-8/C-10/C-11）：设备形态与农学参数据实 ----
+    scenario: str | None = None            # open_field | greenhouse
+    soil_texture: str | None = None
+    root_depth_cm: float | None = None
+    # 该地块声明的指标集（前端据此决定渲染墒情仪表还是 CO₂ 卡）
+    metrics: list[str] = Field(default_factory=list)
+    # 该地块按土壤质地实际生效的阈值（前端优先于顶层 thresholds）
+    thresholds: dict[str, Any] | None = None
 
 
 class MetaTemperature(BaseModel):
@@ -223,10 +237,19 @@ class MetaSoilMoisture(BaseModel):
     critical_min: int
 
 
+class MetaCo2(BaseModel):
+    min: int
+    max: int
+    critical_min: int
+    critical_max: int
+
+
 class MetaThresholds(BaseModel):
     temperature: MetaTemperature
     humidity: MetaHumidity
     soil_moisture: MetaSoilMoisture
+    # V2.1 C-10：温室 CO₂ 阈值（前端 Co2Card 优先取后端值）。
+    co2: MetaCo2 | None = None
 
 
 class MetaCrop(BaseModel):
@@ -359,6 +382,9 @@ class ReasoningContextPlot(BaseModel):
     stage: str
     col: int | None = None
     row: int | None = None
+    # V2.1 C-7：场景与土壤质地（决定高温方案走通风还是滴灌降温、墒情阈值分档）。
+    scenario: str | None = None
+    soil_texture: str | None = None
 
 
 class ReasoningContext(BaseModel):
@@ -367,6 +393,9 @@ class ReasoningContext(BaseModel):
     metrics_stats: dict[str, Any] = Field(default_factory=dict)
     weather: dict[str, Any] | None = None
     thresholds: dict[str, Any] = Field(default_factory=dict)
+    # V2.1 C-8：每个指标的实际来源设备（白盒第一步据此写明来源与安装方式）。
+    devices: list[dict[str, Any]] = Field(default_factory=list)
+    metric_sources: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReasoningPrior(BaseModel):
@@ -374,6 +403,8 @@ class ReasoningPrior(BaseModel):
     power_kwh: float
     level: str | None = None
     hours_below_min: float | None = None
+    # V2.1 C-6：水量平衡明细（根层亏缺水量 / 系统流量 / 时长 / 耗电）。
+    irrigation: dict[str, Any] | None = None
 
 
 class ReasoningResponse(BaseModel):
@@ -441,6 +472,9 @@ class CommandExecuteResponse(BaseModel):
     topic: str
     payload: dict[str, Any]
     status: str
+    # 契约 §9.3（V2 扩展）：published 表示是否真的经 MQTT 下发；detail 给降级说明。
+    published: bool = False
+    detail: str | None = None
 
 
 class CommandHistoryItem(BaseModel):

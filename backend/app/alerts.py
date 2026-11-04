@@ -15,13 +15,21 @@ V2.1 C-4 变更（ClawsGo 审计：福建夜间高湿天天刷告警）：
    温度缺失时不判 humidity 告警（宁可漏报，不可凭半条数据误报）。
 3. 连续越界抑制：任何指标必须最近 ALERT_SUSTAINED_SAMPLES 个采样点连续越界才告警，
    单点毛刺不告警。ALERT_COOLDOWN_SECONDS 作为第二道闸保留。
+
+V2.1 C-12 变更（ClawsGo 审计 2.6：湿度阈值与告警条件不符农学事实）：
+- temperature 阈值下限 15℃ → 5℃（柑橘低温胁迫），0℃ 以下才是冻害 critical。
+- humidity 的判定条件由"连续 3 个采样点 + 气温 ≥20℃"升级为
+  "**按 ts 跨度连续 ≥6 小时越界 + 当前气温落在 20~28℃ 适温区间**"：
+  夜间结露、雨后短时高湿在福建产区是常态，按点判定必然天天刷屏；
+  而炭疽/溃疡需要"适温 + 长时高湿"同时成立。3 小时高湿不告警、6.5 小时才告警。
+- temperature / soil_moisture 仍沿用"连续 ALERT_SUSTAINED_SAMPLES 个采样点"规则。
 """
 from __future__ import annotations
 
 import os
 
 from . import config, db
-from .timeutil import now_iso
+from .timeutil import cutoff_iso, now_iso, parse_iso
 
 METRIC_LABELS = {
     "temperature": ("空气温度", "℃"),
@@ -31,8 +39,13 @@ METRIC_LABELS = {
 
 # V2.1 C-4：连续越界抑制的采样点数（模拟器 5s 一条 → 3 点 ≈ 15 秒）。
 ALERT_SUSTAINED_SAMPLES = 3
-# V2.1 C-4：湿度告警的温度前置条件（℃）；低于该温度的高湿不告警。
-HUMIDITY_ALERT_MIN_TEMPERATURE = 20.0
+# V2.1 C-4/C-12：湿度告警的适温区间（℃）；低于或高于该区间的高湿不构成病害条件。
+HUMIDITY_ALERT_MIN_TEMPERATURE = config.HUMIDITY_RISK_TEMP_MIN
+HUMIDITY_ALERT_MAX_TEMPERATURE = config.HUMIDITY_RISK_TEMP_MAX
+# 判定"连续高湿"时回溯的遥测窗口（小时）。
+HUMIDITY_RISK_WINDOW_HOURS = config.HUMIDITY_RISK_WINDOW_HOURS
+# 回溯的采样条数上限（5s 一条 × 24h = 17280；这里放宽到 20000 仍是有界查询）。
+_SERIES_LIMIT = 20000
 
 # 同一设备+指标+级别在窗口内只落一条告警，避免模拟器 5s 一条把告警表刷爆。
 # 契约 v1.1 §2 已收录该变量；设为 0 表示关闭冷却（每次越界都落库）。
@@ -144,17 +157,56 @@ def _sustained(device_code: str, metric: str) -> bool:
 
 
 def _humidity_allowed(metrics: dict) -> tuple[bool, str]:
-    """湿度告警前置条件（V2.1 C-4）：需要同时高温。返回 (是否允许, 说明)。"""
+    """湿度告警前置条件（V2.1 C-4/C-12）：当前气温必须落在适温区间。返回 (是否允许, 说明)。"""
+    lo, hi = HUMIDITY_ALERT_MIN_TEMPERATURE, HUMIDITY_ALERT_MAX_TEMPERATURE
     raw = metrics.get("temperature")
     if raw is None:
-        return False, f"温度缺失，不判湿度告警（需 ≥{_fmt(HUMIDITY_ALERT_MIN_TEMPERATURE)}℃）"
+        return False, f"温度缺失，不判湿度告警（需 {_fmt(lo)}~{_fmt(hi)}℃）"
     try:
         temperature = float(raw)
     except (TypeError, ValueError):
-        return False, f"温度非数值，不判湿度告警（需 ≥{_fmt(HUMIDITY_ALERT_MIN_TEMPERATURE)}℃）"
-    if temperature < HUMIDITY_ALERT_MIN_TEMPERATURE:
-        return False, f"当前气温 {_fmt(temperature)}℃ 低于 {_fmt(HUMIDITY_ALERT_MIN_TEMPERATURE)}℃，低温高湿不构成病害条件"
+        return False, f"温度非数值，不判湿度告警（需 {_fmt(lo)}~{_fmt(hi)}℃）"
+    if temperature < lo:
+        return False, f"当前气温 {_fmt(temperature)}℃ 低于 {_fmt(lo)}℃，低温高湿不构成病害条件"
+    if temperature > hi:
+        return False, f"当前气温 {_fmt(temperature)}℃ 高于 {_fmt(hi)}℃，超出病害适温区间"
     return True, ""
+
+
+def _sustained_hours(device_code: str, metric: str, min_hours: float) -> bool:
+    """最近一段**连续越界**的 ts 跨度是否 ≥ min_hours（V2.1 C-12）。
+
+    与 _sustained 的区别：这里统计的是真实时间跨度，不是采样点数 ——
+    模拟器 5s 一条时 6 个点只有 30 秒，不能当作"持续 6 小时"。
+    从最新一条往回走，遇到第一个未越界（或非数值）的采样即停止，
+    再取该段首尾 ts 的差值；数据不足或时间戳不可解析时不告警（宁可漏报）。
+    """
+    evaluator = EVALUATORS.get(metric)
+    if evaluator is None or min_hours <= 0:
+        return False
+    rows = db.query(
+        f"""SELECT ts, {metric} AS v FROM telemetry
+            WHERE device_code = ? AND ts >= ? AND {metric} IS NOT NULL
+            ORDER BY ts DESC, id DESC LIMIT ?""",
+        (device_code, cutoff_iso(HUMIDITY_RISK_WINDOW_HOURS), _SERIES_LIMIT),
+    )
+    newest = oldest = None
+    for row in rows:
+        try:
+            value = float(row["v"])
+        except (TypeError, ValueError):
+            break
+        if evaluator(value) is None:
+            break
+        if newest is None:
+            newest = row["ts"]
+        oldest = row["ts"]
+    if newest is None or oldest is None:
+        return False
+    start, end = parse_iso(oldest), parse_iso(newest)
+    if start is None or end is None:
+        return False
+    return (end - start).total_seconds() / 3600.0 >= min_hours
 
 
 def _recent_duplicate(
@@ -202,6 +254,7 @@ def evaluate(device_code: str, metrics: dict) -> list[dict]:
             continue
 
         if metric == "humidity":
+            # V2.1 C-12：适温区间 + 连续 ≥6 小时越界（按 ts 跨度）才判病害风险。
             allowed, _reason = _humidity_allowed(metrics)
             if not allowed:
                 continue
@@ -211,8 +264,11 @@ def evaluate(device_code: str, metrics: dict) -> list[dict]:
             continue
         level, threshold = verdict
 
-        # V2.1 C-4：连续 3 点越界才告警，单点毛刺不告警。
-        if not _sustained(device_code, metric):
+        if metric == "humidity":
+            if not _sustained_hours(device_code, metric, config.HUMIDITY_RISK_MIN_HOURS):
+                continue
+        # V2.1 C-4：temperature / soil_moisture 仍要求连续 3 点越界，单点毛刺不告警。
+        elif not _sustained(device_code, metric):
             continue
 
         if _recent_duplicate(device_code, metric, level, threshold, cutoff):

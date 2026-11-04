@@ -81,27 +81,32 @@
           :levels="plotLevels"
           @select="onSelectPlot"
         />
-        <!-- 核心指标卡：取自已 fetch 的 /api/telemetry/summary -->
-        <div class="panel kpi-panel">
-          <div class="panel-title">
-            <span class="t-left"><span class="bar"></span>核心指标</span>
-            <span class="sub">近 {{ SUMMARY_HOURS }}h 均值</span>
-          </div>
-          <div class="kpi-row">
-            <div class="kpi-cell">
-              <span class="kc-label">平均温度</span>
-              <span class="kc-value mono temp">{{ f1(summary?.temperature?.avg) }}<em>℃</em></span>
-            </div>
-            <div class="kpi-cell">
-              <span class="kc-label">平均湿度</span>
-              <span class="kc-value mono humi">{{ f1(summary?.humidity?.avg) }}<em>%</em></span>
-            </div>
-            <div class="kpi-cell">
-              <span class="kc-label">平均墒情</span>
-              <span class="kc-value mono soil">{{ f1(summary?.soil_moisture?.avg) }}<em>%</em></span>
-            </div>
-          </div>
-        </div>
+        <!-- 核心指标卡：渲染哪几项完全由 /api/meta 的 plots[].metrics 决定。
+             A/B 区是温度·湿度·墒情·土温，C 区菇棚是棚温·湿度·CO₂，列数随之变化。 -->
+        <PlotMetrics
+          :plot="activePlot"
+          :latest="latest"
+          :summary="summary"
+          :thresholds="thresholds"
+        />
+
+        <!-- 实时趋势：设备下拉按 /api/devices 动态生成（5 台），
+             画哪几条线由该设备所属地块的 metrics 决定（环境站无墒情、菇棚有 CO₂）。 -->
+        <RealtimeChart class="left-chart" :devices="devices" :plots="plots" />
+
+        <!-- 墒情仪表 / CO₂ 卡片二选一：地块声明了 soil_moisture 才挂仪表，
+             否则若声明了 co2 就挂 CO₂ 卡片（C 区菇棚）。两者都没有时不渲染。 -->
+        <PlotGauge
+          v-if="activeHasSoil"
+          :value="activeSoil"
+          :device-code="activeSoilDevice"
+          :thresholds="soilThresholds"
+        />
+        <Co2Card
+          v-else-if="activeHasCo2"
+          :value="activeCo2"
+          :thresholds="co2Thresholds"
+        />
 
         <div class="panel weather">
           <div class="panel-title">
@@ -162,12 +167,17 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import AccessiblePanel from '../components/AccessiblePanel.vue'
 import AiChat from '../components/AiChat.vue'
 import AlertPanel from '../components/AlertPanel.vue'
+import Co2Card from '../components/Co2Card.vue'
+import PlotGauge from '../components/PlotGauge.vue'
 import PlotGrid25D from '../components/PlotGrid25D.vue'
+import PlotMetrics from '../components/PlotMetrics.vue'
+import RealtimeChart from '../components/RealtimeChart.vue'
 import ReasoningTree from '../components/ReasoningTree.vue'
 import SettingsModal from '../components/SettingsModal.vue'
 import SkuCard from '../components/SkuCard.vue'
 import ToastHost from '../components/ToastHost.vue'
-import { ackAlert, getAlerts, getConfig, getDevices, getHealth, getMeta, getSummary, getWeatherLatest, reasoningSimulate } from '../api'
+import { ackAlert, getAlerts, getConfig, getDevices, getHealth, getLatest, getMeta, getSummary, getWeatherLatest, reasoningSimulate } from '../api'
+import { metricThreshold, plotThresholds, valueWithSummary } from '../metrics'
 import { ALERT_LIMIT, POLL_INTERVAL_MS, SUMMARY_HOURS } from '../config'
 import { pushToast } from '../toast'
 
@@ -177,6 +187,8 @@ const alerts = ref([])
 const alertsLoading = ref(false)
 const alertsError = ref('')
 const meta = ref({})
+// /api/telemetry/latest：C 区 CO₂ 只在 latest 里有值（summary 无 co2 时用 latest 兜底）
+const latest = ref([])
 const summary = ref(null)
 const weather = ref(null)
 const weatherSource = ref('')
@@ -197,6 +209,23 @@ const aiRef = ref(null)
 let timer = null
 
 const plots = computed(() => meta.value?.plots || [])
+const thresholds = computed(() => meta.value?.thresholds || {})
+// 当前聚焦地块：优先 selectedPlot，回落到第一个地块
+const activePlot = computed(() => plots.value.find((p) => p.plot_code === selectedPlot.value) || plots.value[0] || null)
+const activeMetrics = computed(() => (activePlot.value?.metrics || []))
+const activeHasSoil = computed(() => activeMetrics.value.includes('soil_moisture'))
+const activeHasCo2 = computed(() => activeMetrics.value.includes('co2'))
+const activeSoil = computed(() => valueWithSummary(latest.value, activePlot.value?.plot_code, 'soil_moisture', summary.value))
+const activeCo2 = computed(() => valueWithSummary(latest.value, activePlot.value?.plot_code, 'co2', summary.value))
+// 墒情仪表跟随该地块的 soil 型设备，没有就退回地块内第一台
+const activeSoilDevice = computed(() => {
+  const code = activePlot.value?.plot_code
+  const mine = devices.value.filter((d) => d.plot_code === code)
+  const soil = mine.find((d) => d.type === 'soil')
+  return (soil || mine[0] || {}).device_code || code || '--'
+})
+const soilThresholds = computed(() => metricThreshold('soil_moisture', activePlot.value, thresholds.value))
+const co2Thresholds = computed(() => metricThreshold('co2', activePlot.value, thresholds.value))
 const f1 = (v) => (v === null || v === undefined ? '--' : Number(v).toFixed(1))
 const num = (v) => (v === null || v === undefined ? '--' : Number(v).toFixed(1))
 const onlineCount = computed(() => devices.value.filter((d) => d.status === 'online').length)
@@ -275,6 +304,15 @@ async function loadHealth() {
   }
 }
 
+async function loadLatest() {
+  try {
+    const res = await getLatest()
+    latest.value = Array.isArray(res?.items) ? res.items : []
+  } catch (err) {
+    pushError(`最新遥测加载失败：${err.message}`)
+  }
+}
+
 async function loadSummary() {
   try {
     summary.value = await getSummary(SUMMARY_HOURS)
@@ -347,7 +385,7 @@ function onSaved(cfg) {
 }
 
 async function refreshAll() {
-  await Promise.allSettled([loadHealth(), loadDevices(), loadAlerts(), loadSummary(), loadModelName()])
+  await Promise.allSettled([loadHealth(), loadDevices(), loadAlerts(), loadSummary(), loadLatest(), loadModelName()])
   if (selectedPlot.value) loadWeather(selectedPlot.value)
   lastTick.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
@@ -360,6 +398,7 @@ onMounted(async () => {
     loadDevices()
     loadAlerts()
     loadSummary()
+    loadLatest()
   }, POLL_INTERVAL_MS)
 })
 
@@ -438,20 +477,16 @@ onBeforeUnmount(() => {
 .center { grid-area: center; }
 .right { grid-area: right; }
 .center > * { flex: 1; min-height: 0; }
+/* 折线图在左栏用固定高度，并放开子组件 220px 的 min-height，避免挤掉告警面板 */
+.left-chart { flex: 0 0 auto; height: 186px; }
+.left-chart :deep(.chart-box) { min-height: 0; }
+.left-chart :deep(.chart) { min-height: 0; }
+.left-chart :deep(.ctl select) { max-width: 150px; }
 .left-alerts { flex: 1; min-height: 0; }
 .right-chat { flex: 1; min-height: 0; }
 .right-sku { flex: 0 1 auto; max-height: 34%; overflow-y: auto; }
 
 /* 核心指标卡：KPI 数值 ≥ 20px（三级字号层次的最高一级） */
-.kpi-panel { padding: 8px 11px; }
-.kpi-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.kpi-cell { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.kc-label { font-size: var(--v2-fs-aux); color: var(--v2-sub); letter-spacing: 0.05em; }
-.kc-value { font-size: var(--v2-fs-value); font-weight: 700; color: var(--v2-text); line-height: 1.15; }
-.kc-value em { font-size: 11px; font-style: normal; color: var(--v2-sub); margin-left: 2px; }
-.kc-value.temp { color: var(--v2-warn); }
-.kc-value.humi { color: var(--v2-cyan); }
-.kc-value.soil { color: var(--v2-green); }
 
 .weather { padding: 8px 11px; }
 .w-grid { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; }

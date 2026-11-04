@@ -29,6 +29,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { metricLabel } from '../metrics'
 
 const props = defineProps({
   alerts: { type: Array, default: () => [] },
@@ -39,8 +40,7 @@ const props = defineProps({
 
 defineEmits(['close'])
 
-// 指标名映射与 AlertPanel 保持一致，不新增接口字段
-const METRIC_LABEL = { temperature: '温度', humidity: '湿度', soil_moisture: '土壤墒情' }
+// 指标名映射与 AlertPanel 共用 metrics.js 注册表，C 区 co2 也能显示中文名
 
 const onlineCount = computed(() => props.devices.filter((d) => d.status === 'online').length)
 const unackedCount = computed(() => props.alerts.filter((a) => !a.acked).length)
@@ -89,7 +89,7 @@ const cards = computed(() => {
       kind: critical ? 'danger' : 'warn',
       badge: critical ? '紧急告警' : '预警',
       time: shortTs(a.created_at),
-      title: `${METRIC_LABEL[a.metric] || a.metric} ${num(a.value)}`,
+      title: `${metricLabel(a.metric)} ${num(a.value)}`,
       body: a.message || `${a.device_code} 的 ${METRIC_LABEL[a.metric] || a.metric} 超出阈值 ${num(a.threshold)}`,
       hint: `设备 ${a.device_code} · 阈值 ${num(a.threshold)}`
     })

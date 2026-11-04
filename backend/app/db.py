@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS telemetry (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   device_code TEXT NOT NULL, ts TEXT NOT NULL,
   temperature REAL, humidity REAL, soil_moisture REAL, soil_temp REAL,
-  battery REAL, raw TEXT);
+  co2 REAL, battery REAL, raw TEXT);
 CREATE INDEX IF NOT EXISTS idx_telemetry_device_ts ON telemetry(device_code, ts);
 CREATE INDEX IF NOT EXISTS idx_telemetry_ts ON telemetry(ts);
 CREATE TABLE IF NOT EXISTS ai_chat (
@@ -175,18 +175,31 @@ def executemany(sql: str, rows: list[tuple]) -> int:
         return cur.rowcount
 
 
+# V2.1 C-10：telemetry 增列 co2（温室环境站上报）。老库用 PRAGMA table_info 检查后 ALTER，
+# 幂等且不动已有数据。
+TELEMETRY_EXTRA_COLUMNS = (("co2", "REAL"),)
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(telemetry)")}
+    for name, decl in TELEMETRY_EXTRA_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE telemetry ADD COLUMN {name} {decl}")
+
+
 def init_db() -> None:
     with _write_lock:
         conn = write_conn()
         conn.executescript(DDL)
         conn.executescript(DDL_V2)
+        _ensure_columns(conn)
         conn.commit()
     seed_devices()
     seed_skus()
 
 
 def seed_devices() -> None:
-    """幂等写入契约第 3 节的 4 台设备（已存在则刷新元数据，不动 last_seen）。"""
+    """幂等写入契约第 3 节的设备清单（已存在则刷新元数据，不动 last_seen）。"""
     created = now_iso()
     rows = [
         (
@@ -225,13 +238,13 @@ def seed_skus() -> None:
 # ---------------- 业务查询助手 ----------------
 def insert_telemetry(device_code: str, ts: str, metrics: dict, raw: str | None) -> int:
     return insert(
-        """INSERT INTO telemetry (device_code, ts, temperature, humidity, soil_moisture, soil_temp, battery, raw)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO telemetry (device_code, ts, temperature, humidity, soil_moisture, soil_temp, co2, battery, raw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             device_code, ts,
             metrics.get("temperature"), metrics.get("humidity"),
             metrics.get("soil_moisture"), metrics.get("soil_temp"),
-            metrics.get("battery"), raw,
+            metrics.get("co2"), metrics.get("battery"), raw,
         ),
     )
 
@@ -245,7 +258,7 @@ def touch_device(device_code: str, ts: str) -> None:
 
 def latest_telemetry(device_code: str) -> dict | None:
     return query_one(
-        """SELECT ts, temperature, humidity, soil_moisture, soil_temp, battery
+        """SELECT ts, temperature, humidity, soil_moisture, soil_temp, co2, battery
            FROM telemetry WHERE device_code = ? ORDER BY ts DESC, id DESC LIMIT 1""",
         (device_code,),
     )

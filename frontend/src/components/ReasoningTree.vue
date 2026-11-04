@@ -57,10 +57,7 @@
             <p v-if="n.command" class="plan-dev mono">
               目标设备 {{ n.command.device_code || '--' }} · 参数 {{ paramsText(n.command.params) }}
             </p>
-            <p v-if="n.effect" class="plan-effect mono">
-              <template v-if="n.effect.soil_moisture_delta != null">墒情回升 {{ num(n.effect.soil_moisture_delta) }}%</template>
-              <template v-if="n.effect.yield_recover_pct != null"> · 挽回产量 {{ num(n.effect.yield_recover_pct) }}%</template>
-            </p>
+            <p v-if="effectText(n)" class="plan-effect mono">{{ effectText(n) }}</p>
             <CommandButton
               v-if="n.command"
               :node="n"
@@ -108,6 +105,17 @@ const planNodes = computed(() =>
 )
 
 const num = (v) => (v === null || v === undefined ? '--' : Number(v).toFixed(1))
+
+// 干预效果文案：只有后端真的回了 soil_moisture_delta 才写「墒情回升」，
+// 否则（如 C 区菇棚的通风换气方案）只写产量挽回，避免出现「墒情回升 0%」的假数据。
+function effectText(n) {
+  const e = n && n.effect
+  if (!e) return ''
+  const parts = []
+  if (e.soil_moisture_delta != null && Number(e.soil_moisture_delta) !== 0) parts.push(`墒情回升 ${num(e.soil_moisture_delta)}%`)
+  if (e.yield_recover_pct != null && Number(e.yield_recover_pct) !== 0) parts.push(`挽回产量 ${num(e.yield_recover_pct)}%`)
+  return parts.join(' · ')
+}
 
 function paramsText(params) {
   if (!params || typeof params !== 'object') return '--'

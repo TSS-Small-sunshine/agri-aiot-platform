@@ -64,8 +64,9 @@ export const getDevices = () => request('/devices')
 
 export const getLatest = () => request('/telemetry/latest')
 
-export const getHistory = (deviceCode, hours, limit) =>
-  request(`/telemetry/history${qs({ device_code: deviceCode, hours, limit })}`)
+// metric：可选指标过滤（V2 新增 co2）。不传时后端返回该设备全部指标。
+export const getHistory = (deviceCode, hours, limit, metric) =>
+  request(`/telemetry/history${qs({ device_code: deviceCode, hours, limit, metric })}`)
 
 export const getSummary = (hours) => request(`/telemetry/summary${qs({ hours })}`)
 

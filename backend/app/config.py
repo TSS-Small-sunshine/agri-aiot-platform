@@ -71,7 +71,7 @@ AI_HISTORY_LIMIT = _int("AI_HISTORY_LIMIT", 50)
 SIM_INTERVAL_SECONDS = _int("SIM_INTERVAL_SECONDS", 5)
 SIM_DEVICES = _str(
     "SIM_DEVICES",
-    "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02",
+    "FJ-CITRUS-A01,FJ-CITRUS-A02,FJ-CITRUS-B01,FJ-CITRUS-B02,FJ-MUSH-C01",
 )
 # V2.1 C-1：滴灌真实速率（%/秒，28.8 点/小时，滴灌量级）。knowledge.py 的灌溉时长
 # 由本速率反推，两侧必须共用同一个值才自洽。
@@ -82,6 +82,8 @@ SIM_DEMO_ACCELERATION = _float("SIM_DEMO_ACCELERATION", 30.0)
 SIM_BAD_PROBABILITY = _float("SIM_BAD_PROBABILITY", 0.0)
 # V2.1 C-5：演示场景 normal|drought|heat|disease|cold（连续过程，非单点）。
 SIM_SCENARIO = _str("SIM_SCENARIO", "normal").strip().lower() or "normal"
+# V2.1 C-10：按概率整条丢弃遥测，演示"数据缺失"。0 = 关闭（默认），建议演示值 0.05~0.2。
+SIM_PACKET_LOSS = _float("SIM_PACKET_LOSS", 0.0)
 
 # ---- 设备清单（契约第 3 节；后端种子数据与模拟器必须一致）----
 DEVICES = [
@@ -92,6 +94,7 @@ DEVICES = [
         "plot_name": "A区·柑橘示范园",
         "type": "env",
         "location": "福建省南平市·A区",
+        "install_note": "冠层 1.5m",
     },
     {
         "device_code": "FJ-CITRUS-A02",
@@ -100,6 +103,7 @@ DEVICES = [
         "plot_name": "A区·柑橘示范园",
         "type": "soil",
         "location": "福建省南平市·A区",
+        "install_note": "20cm 埋深",
     },
     {
         "device_code": "FJ-CITRUS-B01",
@@ -108,6 +112,7 @@ DEVICES = [
         "plot_name": "B区·柑橘试验园",
         "type": "env",
         "location": "福建省南平市·B区",
+        "install_note": "冠层 1.5m",
     },
     {
         "device_code": "FJ-CITRUS-B02",
@@ -116,8 +121,26 @@ DEVICES = [
         "plot_name": "B区·柑橘试验园",
         "type": "soil",
         "location": "福建省南平市·B区",
+        "install_note": "20cm 埋深",
+    },
+    {
+        "device_code": "FJ-MUSH-C01",
+        "name": "C区温室环境站",
+        "plot_code": "C",
+        "plot_name": "C区·闽宁协作温室菇棚",
+        "type": "env",
+        "location": "宁夏银川市西夏区·闽宁镇·C区",
+        "install_note": "棚内中层 1.5m",
     },
 ]
+
+# 设备类型 → 指标绑定（V2.1 C-8）：同一地块两类设备各报各的指标，绝不混算。
+DEVICE_METRICS = {
+    "env": ("temperature", "humidity"),
+    "soil": ("soil_moisture", "soil_temp"),
+}
+# 温室环境站额外上报 CO2（V2.1 C-10）。
+GREENHOUSE_EXTRA_METRICS = ("co2",)
 
 # ---- 告警阈值（契约第 6 节 v1.1 + V2.1 C-4，逐条照抄）----
 # temperature：正常 15~35℃；>38 或 <5 → critical；35~38 或 5~15 → warning
@@ -125,20 +148,52 @@ DEVICES = [
 #              上限放宽到 92 是因为福建柑橘产区夜间湿度 85~95% 属常态，
 #              旧上限 85 会每天刷一批无意义告警（ClawsGo 审计 C-4）。
 # soil_moisture：正常 35~80%；<35 → warning；<25 → critical
+# V2.1 C-12：下限从 15℃ 下修到 5℃（柑橘低温胁迫阈值），0℃ 以下才是冻害 critical。
 THRESHOLDS = {
-    "temperature": {"min": 15.0, "max": 35.0, "critical_min": 5.0, "critical_max": 38.0},
+    "temperature": {"min": 5.0, "max": 35.0, "critical_min": 0.0, "critical_max": 38.0},
     "humidity": {"min": 40.0, "max": 92.0, "critical_min": 30.0, "critical_max": 97.0},
     "soil_moisture": {"min": 35.0, "max": 80.0, "critical_min": 25.0},
 }
 
+# V2.1 C-11：墒情阈值按土壤质地分档（砂壤持水差、黏壤持水好，用同一把尺子不合理）。
+SOIL_TEXTURE_THRESHOLDS = {
+    "砂壤": {"min": 28.0, "max": 80.0, "critical_min": 20.0},
+    "壤土": {"min": 35.0, "max": 80.0, "critical_min": 25.0},
+    "黏壤": {"min": 40.0, "max": 80.0, "critical_min": 30.0},
+}
+DEFAULT_SOIL_TEXTURE = "壤土"
 
-def meta_thresholds() -> dict:
-    """GET /api/meta 暴露的阈值结构（字段与契约示例逐字段一致）。"""
+# V2.1 C-10：温室菇棚 CO₂ 阈值（ppm）。香菇出菇期需氧，CO₂ 过高抑制原基分化。
+CO2_THRESHOLDS = {"min": 400.0, "max": 1200.0, "critical_min": 300.0, "critical_max": 1500.0}
+
+# V2.1 C-12：湿度告警升级为"连续 ≥6 小时且气温在 20~28℃"才判病害风险。
+# 单点/短时高湿（夜间结露、雨后）在福建产区是常态，按点判定必然刷屏；
+# 而病害（炭疽/溃疡）需要"适温 + 长时高湿"两个条件同时成立。
+HUMIDITY_RISK_MIN_HOURS = 6.0
+HUMIDITY_RISK_TEMP_MIN = 20.0
+HUMIDITY_RISK_TEMP_MAX = 28.0
+# 回溯窗口：判定"连续高湿"时最多往回看多久的遥测（有界查询，避免全表扫描）。
+HUMIDITY_RISK_WINDOW_HOURS = 24.0
+
+
+def soil_thresholds_for(plot: dict | None) -> dict:
+    """该地块实际生效的墒情阈值（按 soil_texture 分档，缺省壤土）。"""
+    texture = (plot or {}).get("soil_texture") or DEFAULT_SOIL_TEXTURE
+    entry = SOIL_TEXTURE_THRESHOLDS.get(texture) or SOIL_TEXTURE_THRESHOLDS[DEFAULT_SOIL_TEXTURE]
+    return {"min": entry["min"], "max": entry["max"], "critical_min": entry["critical_min"]}
+
+
+def meta_thresholds(plot: dict | None = None) -> dict:
+    """GET /api/meta 暴露的阈值结构（字段与契约示例逐字段一致）。
+
+    传入地块时 soil_moisture 段返回该地块按土壤质地实际生效的阈值（V2.1 C-11）。
+    """
+    soil = soil_thresholds_for(plot)
     return {
         "temperature": {
-            "min": 15,
+            "min": 5,
             "max": 35,
-            "critical_min": 5,
+            "critical_min": 0,
             "critical_max": 38,
         },
         "humidity": {
@@ -147,7 +202,18 @@ def meta_thresholds() -> dict:
             "critical_min": 30,
             "critical_max": 97,
         },
-        "soil_moisture": {"min": 35, "max": 80, "critical_min": 25},
+        "soil_moisture": {
+            "min": int(soil["min"]),
+            "max": int(soil["max"]),
+            "critical_min": int(soil["critical_min"]),
+        },
+        # V2.1 C-10：温室 CO₂ 段（前端 Co2Card 优先用后端值，缺失才用内置兜底）。
+        "co2": {
+            "min": int(CO2_THRESHOLDS["min"]),
+            "max": int(CO2_THRESHOLDS["max"]),
+            "critical_min": int(CO2_THRESHOLDS["critical_min"]),
+            "critical_max": int(CO2_THRESHOLDS["critical_max"]),
+        },
     }
 
 
@@ -173,8 +239,11 @@ MQTT_COMMAND_QOS = 1
 COMMAND_ACTIONS = ("irrigation_on", "irrigation_off", "pesticide_dose", "ventilation_on")
 
 # ---- 农学先验模型口径（V2_PLAN.md 第 13 节第 5 条，答辩口径，不得随手改）----
-POWER_KWH_PER_MU = 0.15                  # 亩均滴灌耗电 kWh
-YIELD_LOSS_MIN_PCT = 15.0                # 水分胁迫减产下限
+# V2.1 C-6：耗电口径改为「每立方米灌溉水的耗电」，低扬程滴灌合理区间 0.12~0.18。
+KWH_PER_M3 = 0.15                        # 灌溉耗电 kWh/m³
+# V2.1 C-6：单次灌溉时长上限（24h）。超过按上限执行，方案里说明本次只覆盖亏缺的一部分。
+IRRIGATION_MAX_MINUTES = 1440
+# V2.1 C-11：减产率连续化后不再有 15% 下限，只保留上限（水分胁迫最大减产）。
 YIELD_LOSS_MAX_PCT = 25.0                # 水分胁迫减产上限
 REASONING_PRIOR_TOLERANCE_PCT = 15.0     # 大模型数字与先验偏差超过该值即以先验为准
 PROMPT_MAX_BYTES = 8192                  # prompt 截断上限（第 12 节 2C2G 内存约束）
@@ -184,46 +253,158 @@ COMMAND_HISTORY_LIMIT = 100              # /api/command/history 条数上限
 WEATHER_FORECAST_HOURS = 24              # 气象预报时长
 
 # ---- 地块元数据（V2_PLAN.md 第 6 节 /api/meta 扩展：2.5D 网格坐标 + 作物/面积/物候期）----
+# V2.1 C-6/C-7：地块补齐"灌溉水量平衡"所需参数与物候窗口；作物品种按产地据实（福建南平
+# 主栽芦柑/南丰蜜桔，旧沃柑/沙糖桔与产地不符）；新增闽宁协作 C 区温室菇棚。
+#   root_depth_cm   根层深度（cm）
+#   soil_texture    土壤质地（砂壤|壤土|黏壤），决定墒情阈值
+#   wetted_ratio    滴灌湿润区占根层面积比例
+#   drip_emitter_lph/drip_spacing_m/row_spacing_m  滴灌系统参数（算系统流量）
+#   scenario        open_field（露天）| greenhouse（温室）
+#   stage_window    当前物候期的日期窗口（MM-DD，跨年时 start > end）
 PLOTS = [
     {
         "plot_code": "A",
         "plot_name": "A区·柑橘示范园",
         "name": "A区柑橘园",
-        "crop": "柑橘(沃柑)",
+        "crop": "柑橘(芦柑)",
         "area_mu": 12.5,
-        "stage": "果实膨大期",
+        "stage": "果实转色期",
         "col": 0,
         "row": 0,
+        "root_depth_cm": 40.0,
+        "soil_texture": "壤土",
+        "wetted_ratio": 0.30,
+        "drip_emitter_lph": 2.0,
+        "drip_spacing_m": 0.30,
+        "row_spacing_m": 4.0,
+        "scenario": "open_field",
+        "stage_window": {"start": "10-01", "end": "11-30"},
+        "stage_cycle": [
+            {"stage": "休眠期", "start": "01-01", "end": "02-28"},
+            {"stage": "春梢现蕾期", "start": "03-01", "end": "04-30"},
+            {"stage": "谢花坐果期", "start": "05-01", "end": "06-30"},
+            {"stage": "果实膨大期", "start": "07-01", "end": "09-30"},
+            {"stage": "果实转色期", "start": "10-01", "end": "11-30"},
+            {"stage": "成熟采收期", "start": "12-01", "end": "12-31"},
+        ],
     },
     {
         "plot_code": "B",
         "plot_name": "B区·柑橘试验园",
         "name": "B区柑橘园",
-        "crop": "柑橘(沙糖桔)",
+        "crop": "柑橘(南丰蜜桔)",
         "area_mu": 9.8,
-        "stage": "果实膨大期",
+        "stage": "成熟采收期",
         "col": 1,
         "row": 0,
+        "root_depth_cm": 40.0,
+        "soil_texture": "砂壤",
+        "wetted_ratio": 0.30,
+        "drip_emitter_lph": 2.0,
+        "drip_spacing_m": 0.30,
+        "row_spacing_m": 4.0,
+        "scenario": "open_field",
+        "stage_window": {"start": "11-01", "end": "12-31"},
+        "stage_cycle": [
+            {"stage": "休眠期", "start": "01-01", "end": "02-28"},
+            {"stage": "春梢现蕾期", "start": "03-01", "end": "04-30"},
+            {"stage": "谢花坐果期", "start": "05-01", "end": "06-30"},
+            {"stage": "果实膨大期", "start": "07-01", "end": "09-30"},
+            {"stage": "果实转色期", "start": "10-01", "end": "10-31"},
+            {"stage": "成熟采收期", "start": "11-01", "end": "12-31"},
+        ],
+    },
+    {
+        "plot_code": "C",
+        "plot_name": "C区·闽宁协作温室菇棚",
+        "name": "C区菇棚",
+        "crop": "香菇",
+        "area_mu": 1.2,
+        "stage": "出菇期",
+        "col": 2,
+        "row": 0,
+        "root_depth_cm": 15.0,
+        "soil_texture": "壤土",
+        "wetted_ratio": 0.25,
+        "drip_emitter_lph": 2.0,
+        "drip_spacing_m": 0.30,
+        "row_spacing_m": 0.40,
+        "scenario": "greenhouse",
+        "stage_window": {"start": "09-01", "end": "04-30"},
+        "stage_cycle": [
+            {"stage": "菌丝培养期", "start": "05-01", "end": "08-31"},
+            {"stage": "出菇期", "start": "09-01", "end": "04-30"},
+        ],
     },
 ]
 
 PLOT_BY_CODE = {p["plot_code"]: p for p in PLOTS}
 
+DEVICE_BY_CODE = {d["device_code"]: d for d in DEVICES}
+
+
+def _in_stage_window(month_day: str, start: str, end: str) -> bool:
+    if start <= end:
+        return start <= month_day <= end
+    return month_day >= start or month_day <= end
+
+
+def resolve_stage(plot: dict | None, now=None) -> str:
+    """按当前月份推导物候期（V2.1 C-7），不再写死。
+
+    优先走地块的 stage_cycle（全年窗口表）；只有 stage_window 时按该窗口判断，
+    命中返回声明值，未命中返回「非该物候期」。
+    """
+    if not plot:
+        return ""
+    if now is None:
+        from datetime import datetime as _dt
+
+        now = _dt.now()
+    month_day = now.strftime("%m-%d")
+    cycle = plot.get("stage_cycle") or []
+    for entry in cycle:
+        start, end = entry.get("start"), entry.get("end")
+        if start and end and _in_stage_window(month_day, start, end):
+            return entry.get("stage", "")
+    window = plot.get("stage_window") or {}
+    start, end = window.get("start"), window.get("end")
+    if start and end and _in_stage_window(month_day, start, end):
+        return plot.get("stage", "")
+    return plot.get("stage", "")
+
+
+def plot_meta(plot_code: str) -> dict | None:
+    """地块元数据（stage 按当前月份推导）；未知地块返回 None。"""
+    plot = PLOT_BY_CODE.get(plot_code)
+    if plot is None:
+        return None
+    resolved = dict(plot)
+    resolved["stage"] = resolve_stage(plot)
+    return resolved
+
 # ---- 作物清单（/api/meta 的 crops 段）----
 CROPS = [
     {
-        "crop_code": "citrus-wo",
-        "name": "柑橘(沃柑)",
-        "stage": "果实膨大期",
+        "crop_code": "citrus-lugan",
+        "name": "柑橘(芦柑)",
+        "stage": "果实转色期",
         "plot_codes": ["A"],
         "area_mu": 12.5,
     },
     {
-        "crop_code": "citrus-st",
-        "name": "柑橘(沙糖桔)",
-        "stage": "果实膨大期",
+        "crop_code": "citrus-nanfeng",
+        "name": "柑橘(南丰蜜桔)",
+        "stage": "成熟采收期",
         "plot_codes": ["B"],
         "area_mu": 9.8,
+    },
+    {
+        "crop_code": "shiitake",
+        "name": "香菇",
+        "stage": "出菇期",
+        "plot_codes": ["C"],
+        "area_mu": 1.2,
     },
 ]
 
@@ -283,6 +464,17 @@ SKUS = [
         "stock": 60,
         "description": "贴片式滴灌带，滴头间距 30cm，流量 2L/h，配合水肥一体化少量多次。",
         "keywords": "滴灌,灌溉,缺水,抗旱,墒情,水肥一体化",
+    },
+    {
+        "id": "sku-fungicide",
+        "name": "保护性杀菌剂(代森锰锌)",
+        "category": "植保",
+        "price": 56.0,
+        "unit": "袋(500g)",
+        "image": "sku-fungicide",
+        "stock": 100,
+        "description": "80% 代森锰锌可湿性粉剂，炭疽病/溃疡病保护性预防用药，发病前或雨前喷施；具体稀释倍数与安全间隔期按标签与农技员确认。",
+        "keywords": "炭疽病,溃疡病,杀菌剂,代森锰锌,咪鲜胺,病害,预防,高湿",
     },
     {
         "id": "sku-soil-probe",

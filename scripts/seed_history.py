@@ -1,7 +1,7 @@
 """一键演示用的历史数据灌入脚本。
 
 直接写 SQLite（复用 backend/app 的 DDL 与设备清单，避免两处漂移），
-默认灌入过去 24 小时、每 5 分钟一条、共 4 台设备（每台 288 个点）。
+默认灌入过去 24 小时、每 5 分钟一条、覆盖 config.DEVICES 全部设备（每台 288 个点）。
 
 用法：
     python scripts/seed_history.py
@@ -26,11 +26,14 @@ from app import config, db  # noqa: E402
 from app.timeutil import LOCAL_TZ, now, to_iso  # noqa: E402
 
 # 与模拟器一致的基线，保证"历史数据"与"实时数据"接得上
+# 每台设备只给出它真实会测的量：环境站给温湿度，墒情站给墒情与土温，
+# 温室菇棚给棚内温湿度与 CO₂。缺哪个键，历史数据里那一列就是 NULL。
 BASELINE = {
-    "FJ-CITRUS-A01": {"temperature": 25.5, "humidity": 70.0, "soil_moisture": 58.0, "soil_temp": 23.0, "battery": 94.0},
-    "FJ-CITRUS-A02": {"temperature": 25.0, "humidity": 68.0, "soil_moisture": 52.0, "soil_temp": 22.5, "battery": 91.0},
-    "FJ-CITRUS-B01": {"temperature": 26.5, "humidity": 66.0, "soil_moisture": 61.0, "soil_temp": 24.0, "battery": 88.0},
-    "FJ-CITRUS-B02": {"temperature": 26.0, "humidity": 64.0, "soil_moisture": 47.0, "soil_temp": 23.5, "battery": 85.0},
+    "FJ-CITRUS-A01": {"temperature": 25.5, "humidity": 70.0, "battery": 94.0},
+    "FJ-CITRUS-A02": {"soil_moisture": 52.0, "soil_temp": 22.5, "battery": 91.0},
+    "FJ-CITRUS-B01": {"temperature": 26.5, "humidity": 66.0, "battery": 88.0},
+    "FJ-CITRUS-B02": {"soil_moisture": 47.0, "soil_temp": 23.5, "battery": 85.0},
+    "FJ-MUSH-C01": {"temperature": 18.0, "humidity": 88.0, "co2": 820.0, "battery": 97.0},
 }
 
 # 历史中按概率制造少量越界点，让 /api/alerts 与图表"有故事"
@@ -65,27 +68,44 @@ def build_rows(hours: float, step_minutes: float, bad_probability: float) -> lis
             if drift < -6.0:
                 drift = random.uniform(2.0, 6.0)  # 灌溉回升
 
-            temperature = base["temperature"] + daily_cycle(moment, 5.2, 14.0) + random.gauss(0, 0.4)
-            humidity = base["humidity"] - daily_cycle(moment, 9.0, 14.0) + random.gauss(0, 1.2)
-            soil_moisture = base["soil_moisture"] + drift + random.gauss(0, 0.4)
-            soil_temp = base["soil_temp"] + daily_cycle(moment, 2.4, 16.0) + random.gauss(0, 0.25)
             battery = max(5.0, battery - random.uniform(0.0008, 0.003))
+            metrics: dict = {"battery": round(battery, 1)}
 
-            metrics = {
-                "temperature": round(temperature, 1),
-                "humidity": round(max(5.0, min(100.0, humidity)), 1),
-                "soil_moisture": round(max(2.0, min(100.0, soil_moisture)), 1),
-                "soil_temp": round(soil_temp, 1),
-                "battery": round(battery, 1),
-            }
+            # V2.1 C-10：按设备形态裁剪上报字段，与 simulator/mock_sensor.py 保持一致
+            #   env（环境站）   -> temperature / humidity（温室另加 co2）
+            #   soil（墒情站）  -> soil_moisture / soil_temp
+            if "temperature" in base:
+                metrics["temperature"] = round(
+                    base["temperature"] + daily_cycle(moment, 5.2, 14.0) + random.gauss(0, 0.4), 1
+                )
+            if "humidity" in base:
+                metrics["humidity"] = round(
+                    max(5.0, min(100.0, base["humidity"] - daily_cycle(moment, 9.0, 14.0) + random.gauss(0, 1.2))), 1
+                )
+            if "soil_moisture" in base:
+                metrics["soil_moisture"] = round(
+                    max(2.0, min(100.0, base["soil_moisture"] + drift + random.gauss(0, 0.4))), 1
+                )
+            if "soil_temp" in base:
+                metrics["soil_temp"] = round(
+                    base["soil_temp"] + daily_cycle(moment, 2.4, 16.0) + random.gauss(0, 0.25), 1
+                )
+            if "co2" in base:
+                # 温室菇棚：CO₂ 随通风/呼吸作用日内波动，夜间高、午后低
+                metrics["co2"] = round(
+                    base["co2"] - daily_cycle(moment, 180.0, 14.0) + random.gauss(0, 12.0), 1
+                )
+
             if random.random() < bad_probability:
-                metric = random.choice(list(OUT_OF_RANGE))
-                metrics[metric] = round(random.choice(OUT_OF_RANGE[metric]), 1)
+                candidates = [k for k in OUT_OF_RANGE if k in metrics]
+                if candidates:
+                    metric = random.choice(candidates)
+                    metrics[metric] = round(random.choice(OUT_OF_RANGE[metric]), 1)
 
             rows.append((
                 code, to_iso(moment.astimezone(LOCAL_TZ)),
-                metrics["temperature"], metrics["humidity"], metrics["soil_moisture"],
-                metrics["soil_temp"], metrics["battery"], None,
+                metrics.get("temperature"), metrics.get("humidity"), metrics.get("soil_moisture"),
+                metrics.get("soil_temp"), metrics.get("co2"), metrics["battery"], None,
             ))
 
     return rows
@@ -96,7 +116,10 @@ def main() -> int:
     parser.add_argument("--hours", type=float, default=24, help="回溯小时数（默认 24）")
     parser.add_argument("--step-minutes", type=float, default=5, help="采样间隔分钟（默认 5）")
     parser.add_argument("--db", default=None, help="SQLite 文件路径（默认取 DB_PATH 环境变量）")
-    parser.add_argument("--bad-probability", type=float, default=0.03, help="越界点概率（默认 0.03）")
+    parser.add_argument(
+        "--bad-probability", type=float, default=None,
+        help="越界点概率（默认取 SIM_BAD_PROBABILITY，V2.1 起为 0；>0 时注入少量越界样本供演示）",
+    )
     parser.add_argument("--clear", action="store_true", help="先清空 telemetry 表再灌入")
     args = parser.parse_args()
 
@@ -111,11 +134,12 @@ def main() -> int:
     if args.clear:
         db.execute("DELETE FROM telemetry")
 
-    rows = build_rows(args.hours, args.step_minutes, args.bad_probability)
+    bad_probability = config.SIM_BAD_PROBABILITY if args.bad_probability is None else args.bad_probability
+    rows = build_rows(args.hours, args.step_minutes, bad_probability)
     db.executemany(
         """INSERT INTO telemetry
-           (device_code, ts, temperature, humidity, soil_moisture, soil_temp, battery, raw)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (device_code, ts, temperature, humidity, soil_moisture, soil_temp, co2, battery, raw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
 
@@ -126,7 +150,7 @@ def main() -> int:
     per_device = len(rows) // max(len(config.DEVICES), 1)
     print(
         f"[seed] 已写入 {len(rows)} 条遥测（{len(config.DEVICES)} 台设备 × 约 {per_device} 点），"
-        f"跨度 {args.hours}h / 步长 {args.step_minutes}min"
+        f"跨度 {args.hours}h / 步长 {args.step_minutes}min / 越界概率 {bad_probability:g}"
     )
     print(f"[seed] 数据库：{config.DB_PATH}")
 

@@ -21,7 +21,8 @@ from .timeutil import normalize_iso
 
 log = logging.getLogger("agri.mqtt")
 
-METRIC_KEYS = ("temperature", "humidity", "soil_moisture", "soil_temp", "battery")
+# V2.1 C-10：co2 必须在此登记，否则温室环境站上报的 CO2 会在入库前被静默丢弃。
+METRIC_KEYS = ("temperature", "humidity", "soil_moisture", "soil_temp", "co2", "battery")
 
 
 class MqttIngest:

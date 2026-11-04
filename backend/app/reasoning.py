@@ -136,7 +136,7 @@ def _stats(rows: list[dict], key: str) -> dict:
     }
 
 
-def _hours_below_min(device_codes: list[str], min_value: float, hours: int = 24) -> float:
+def _hours_below_min(device_codes: list[str], min_value: float, hours: int = 72) -> float:
     """墒情连续低于正常下限的持续小时数（从最近一次采样往回找第一个达标点）。
 
     数据不足时按窗口内低于下限的样本跨度估算，避免"数据少就报 0 小时"。
@@ -172,20 +172,14 @@ def _hours_below_min(device_codes: list[str], min_value: float, hours: int = 24)
     return round(max(spans), 2) if spans else 0.0
 
 
-def build_context(plot_code: str) -> dict:
-    """按 §8.1 组装上下文（全部来自真实库表与配置，无编造值）。"""
+def build_context(plot_code: str) -> dict | None:
+    """按 §8.1 组装上下文（全部来自真实库表与配置，无编造值）；未知地块返回 None。"""
     from .timeutil import cutoff_iso
 
-    plot_meta = config.PLOT_BY_CODE.get(plot_code) or {
-        "plot_code": plot_code,
-        "plot_name": f"{plot_code}区",
-        "name": f"{plot_code}区地块",
-        "crop": "柑橘",
-        "area_mu": 10.0,
-        "stage": "果实膨大期",
-        "col": 0,
-        "row": 0,
-    }
+    # V2.1 C-9：未知地块不再编造默认地块，直接返回 None，由路由层给出 404。
+    plot_meta = config.plot_meta(plot_code)
+    if plot_meta is None:
+        return None
     device_codes = [d["device_code"] for d in config.DEVICES if d["plot_code"] == plot_code]
     if not device_codes:
         device_codes = [d["device_code"] for d in db.list_devices() if d["plot_code"] == plot_code]
@@ -203,42 +197,78 @@ def build_context(plot_code: str) -> dict:
         else []
     )
 
-    metrics: dict = {}
-    for key in ("temperature", "humidity", "soil_moisture", "soil_temp", "battery"):
-        stats = _stats(window_rows, key)
-        metrics[key] = stats["latest"] if stats["latest"] is not None else None
-    stats_by_metric = {
-        key: _stats(window_rows, key)
-        for key in ("temperature", "humidity", "soil_moisture", "soil_temp", "battery")
+    # V2.1 C-8：指标按设备类型绑定——墒情/土温只取 type=="soil"，气温/湿度只取 type=="env"。
+    devices = [
+        {
+            "device_code": d["device_code"],
+            "type": d.get("type"),
+            "install_note": d.get("install_note", ""),
+        }
+        for d in config.DEVICES
+        if d["plot_code"] == plot_code
+    ] or [
+        {"device_code": d["device_code"], "type": d["type"], "install_note": ""}
+        for d in db.list_devices()
+        if d["plot_code"] == plot_code
+    ]
+    type_by_code = {d["device_code"]: d.get("type") for d in devices}
+
+    def rows_of(device_type: str) -> list[dict]:
+        return [r for r in window_rows if type_by_code.get(r["device_code"]) == device_type]
+
+    env_rows = rows_of("env")
+    soil_rows = rows_of("soil")
+
+    # 温室环境站额外上报 CO2；露天地块没有这一路数据。
+    metric_groups = {
+        "temperature": env_rows,
+        "humidity": env_rows,
+        "co2": env_rows,
+        "soil_moisture": soil_rows,
+        "soil_temp": soil_rows,
+        "battery": window_rows,
     }
+    metric_keys = (
+        ("temperature", "humidity", "soil_moisture", "soil_temp", "battery")
+        + (("co2",) if plot_meta.get("scenario") == "greenhouse" else ())
+    )
+
+    stats_by_metric = {key: _stats(metric_groups.get(key, []), key) for key in metric_keys}
+    metrics: dict = {key: stats_by_metric[key]["latest"] for key in metric_keys}
+    # battery 取本窗口所有设备的平均值（电量是设备自身状态，不属于任何一类指标）。
+    metrics["battery"] = _stats(window_rows, "battery")["latest"]
 
     # 气象：优先用 weather.context_snapshot 归一化后的字段名（与 §7 冻结结构一致）
     weather = weather_mod.context_snapshot(plot_code)
 
-    return {
+    soil_thresholds = config.soil_thresholds_for(plot_meta)
+    context = {
         "plot": {
             "plot_code": plot_meta["plot_code"],
             "plot_name": plot_meta["plot_name"],
             "name": plot_meta.get("name") or plot_meta["plot_name"],
             "crop": plot_meta.get("crop", "柑橘"),
             "area_mu": plot_meta.get("area_mu", 10.0),
-            "stage": plot_meta.get("stage", "果实膨大期"),
+            "stage": plot_meta.get("stage", ""),
             "col": plot_meta.get("col", 0),
             "row": plot_meta.get("row", 0),
+            "scenario": plot_meta.get("scenario", "open_field"),
+            "soil_texture": plot_meta.get("soil_texture"),
         },
         "metrics": metrics,
         "metrics_stats": stats_by_metric,
         "weather": weather,
-        "thresholds": config.meta_thresholds(),
+        "thresholds": config.meta_thresholds(plot_meta),
         "device_codes": device_codes,
+        "devices": devices,
         "window_samples": window_rows,
         "window_minutes": config.REASONING_WINDOW_MINUTES,
-        "hours_below_min": _hours_below_min(
-            device_codes, float(config.THRESHOLDS["soil_moisture"]["min"])
-        )
+        "hours_below_min": _hours_below_min(device_codes, float(soil_thresholds["min"]))
         if device_codes
         else 0.0,
     }
+    context["metric_sources"] = knowledge.metric_sources(context["plot"], context)
+    return context
 
 
 # ---------------- Prompt 渲染（§8.3 原文模板） ----------------
@@ -263,16 +293,40 @@ def render_user_prompt(context: dict, prior: dict) -> str:
         )
     )
 
-    body = f"""【地块】{plot['name']}｜作物 {plot['crop']}｜面积 {plot['area_mu']} 亩｜物候期 {plot['stage']}
+    sources = context.get("metric_sources") or {}
+
+    def src(metric: str) -> str:
+        entry = sources.get(metric) or {}
+        if not entry:
+            return "无对应设备"
+        note = entry.get("install_note") or ""
+        return f"{entry.get('device_code')}" + (f"（{note}）" if note else "")
+
+    scenario_cn = "温室" if plot.get("scenario") == "greenhouse" else "露天"
+    irrigation = prior.get("irrigation") or {}
+    if irrigation:
+        water_line = (
+            f"水量平衡：根层亏缺 {irrigation.get('water_m3')} m³ ÷ 系统流量 "
+            f"{irrigation.get('flow_m3_per_h')} m³/h → {irrigation.get('duration_min')} 分钟；"
+            f"耗电 {irrigation.get('power_kwh')} kWh（{config.KWH_PER_M3} kWh/m³）"
+        )
+    else:
+        water_line = "水量平衡：当前无灌溉需求（墒情未低于正常下限）"
+
+    co2_line = ""
+    if plot.get("scenario") == "greenhouse":
+        co2_line = f"\n棚内 CO₂ {num(m.get('co2'), 'ppm')}（{src('co2')}）"
+
+    body = f"""【地块】{plot['name']}｜作物 {plot['crop']}｜面积 {plot['area_mu']} 亩｜物候期 {plot['stage']}｜场景 {scenario_cn}｜土壤质地 {plot.get('soil_texture') or '壤土'}
 【实时传感（最近 {context['window_minutes']} 分钟）】
-空气温度 {num(m.get('temperature'), '℃')}（正常 {t['min']}~{t['max']}，critical >{t['critical_max']}）
-空气湿度 {num(m.get('humidity'), '%')}（正常 {h['min']}~{h['max']}，critical >{h['critical_max']} 或 <{h['critical_min']}）
-土壤墒情 {num(m.get('soil_moisture'), '%')}（正常 {s['min']}~{s['max']}，critical <{s['critical_min']}）
-土壤温度 {num(m.get('soil_temp'), '℃')}｜设备电量 {num(m.get('battery'), '%')}
+空气温度 {num(m.get('temperature'), '℃')}（{src('temperature')}；正常 {t['min']}~{t['max']}，critical >{t['critical_max']}）
+空气湿度 {num(m.get('humidity'), '%')}（{src('humidity')}；正常 {h['min']}~{h['max']}，critical >{h['critical_max']} 或 <{h['critical_min']}）
+土壤墒情 {num(m.get('soil_moisture'), '%')}（{src('soil_moisture')}；正常 {s['min']}~{s['max']}，critical <{s['critical_min']}）
+土壤温度 {num(m.get('soil_temp'), '℃')}（{src('soil_temp')}）｜设备电量 {num(m.get('battery'), '%')}{co2_line}
 【气象（未来 24h 模拟预报）】
 {weather_line}
 【后端农学先验模型参考（独立算出，仅供交叉校验，你可以不同意并给出你的判断）】
-水分胁迫减产估计 {prior['yield_loss_pct']}%｜滴灌一次预计耗电 {prior['power_kwh']} kWh（按 {plot['area_mu']} 亩 × {config.POWER_KWH_PER_MU} kWh/亩）
+水分胁迫减产估计 {prior['yield_loss_pct']}%｜{water_line}
 【任务】判断胁迫等级；给出减产风险百分比（整数 0~100）；给出 2~3 条干预策略及预计耗电与墒情回升；
 如涉及植保用药给出药品关键词；输出 3 步白盒推演过程。
 【输出 JSON Schema】{json.dumps(INLINE_SCHEMA, ensure_ascii=False)}"""
@@ -319,12 +373,35 @@ def _whitebox(context: dict, prior: dict, payload: dict, raw_response: str | Non
     samples = context.get("window_samples") or []
     w = context.get("weather") or {}
 
+    sources = context.get("metric_sources") or {}
+
+    def src(metric: str, fallback: str) -> str:
+        entry = sources.get(metric) or {}
+        if not entry:
+            return fallback
+        note = entry.get("install_note") or ""
+        return f"来自 {entry.get('device_code')}" + (f"（{note}）" if note else "")
+
+    irrigation = prior.get("irrigation") or {}
+    water_text = (
+        f"水量平衡：亏缺 {irrigation.get('water_m3')} m³ ÷ 系统流量 "
+        f"{irrigation.get('flow_m3_per_h')} m³/h → {irrigation.get('duration_min')} 分钟，"
+        f"耗电 {irrigation.get('power_kwh')} kWh（{config.KWH_PER_M3} kWh/m³）；"
+        if irrigation
+        else ""
+    )
+    co2_text = f"棚内 CO₂ {_num(m.get('co2'), 'ppm')}、"
+
     step1 = (
         f"读取 {plot['name']} 最近 {context['window_minutes']} 分钟遥测，共 {len(samples)} 条样本"
         f"（设备 {', '.join(context.get('device_codes') or []) or '无'}）："
-        f"气温 {_num(m.get('temperature'), '℃')}、湿度 {_num(m.get('humidity'), '%')}、"
-        f"墒情 {_num(m.get('soil_moisture'), '%')}、土温 {_num(m.get('soil_temp'), '℃')}、"
-        f"电量 {_num(m.get('battery'), '%')}；"
+        f"气温 {_num(m.get('temperature'), '℃')}（{src('temperature', '本地块无环境站')}）、"
+        f"湿度 {_num(m.get('humidity'), '%')}（{src('humidity', '本地块无环境站')}）、"
+        f"墒情 {_num(m.get('soil_moisture'), '%')}（{src('soil_moisture', '本地块无墒情站')}）、"
+        f"土温 {_num(m.get('soil_temp'), '℃')}（{src('soil_temp', '本地块无墒情站')}）、"
+        + (co2_text if plot.get("scenario") == "greenhouse" else "")
+        + f"电量 {_num(m.get('battery'), '%')}；"
+        + water_text
         + (
             f"气象：{w.get('condition')} {w.get('temperature')}℃ 湿度 {w.get('humidity')}% "
             f"降水 {w.get('rainfall_mm')}mm {w.get('wind_dir')}风 {w.get('wind_level')} 级"
@@ -377,6 +454,9 @@ async def simulate(plot_code: str, node_id: str | None = None) -> dict:
     reasoning_id = new_reasoning_id()
 
     context = build_context(plot_code)
+    if context is None:
+        # V2.1 C-9：未知地块绝不编造结论，直接抛出由路由层转成 404。
+        raise ValueError(f"plot not found: {plot_code}")
     prior = knowledge.evaluate(context)
     prompt = build_prompt(context, prior)
 
@@ -458,6 +538,7 @@ async def simulate(plot_code: str, node_id: str | None = None) -> dict:
             "power_kwh": prior["power_kwh"],
             "level": prior["level"],
             "hours_below_min": prior["hours_below_min"],
+            "irrigation": prior.get("irrigation"),
         },
     }
 
