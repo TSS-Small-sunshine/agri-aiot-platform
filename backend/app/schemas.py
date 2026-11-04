@@ -280,6 +280,10 @@ class ConfigTestResponse(BaseModel):
     latency_ms: int
     models: list[str] = Field(default_factory=list)
     error: str | None = None
+    # 列表接口可用 ≠ 所选模型可调用：中转网关常列出已被上游下线的模型。
+    model_ok: bool | None = None
+    tested_model: str | None = None
+    model_error: str | None = None
 
 
 # ---------------- 推演（第 7 节冻结结构） ----------------

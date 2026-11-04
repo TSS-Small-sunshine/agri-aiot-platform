@@ -12,7 +12,7 @@
 
 - `GET /api/config`：返回当前**生效**配置，`api_key` **只回显掩码**（`sk-****abcd`），完整值永不返回。
 - `PUT /api/config`：写 `RUNTIME_CONFIG_PATH` 并**立即热生效**——后端每次调用都重新读文件，进程内无缓存，**无需改代码、无需重启容器**。
-- `POST /api/config/test`：用当前配置探活 `{base_url}/models`，失败也返回 200 + `ok=false` + `error`。
+- `POST /api/config/test`：用当前配置探活 `{base_url}/models`，失败也返回 200 + `ok=false` + `error`；**并额外用 1 token 的最小请求实测当前所选模型能否调用**，返回 `model_ok` / `tested_model` / `model_error`（见 [难点六](CHANGELOG.md)）。
 - `GET /api/models`：运行时模型列表（V1 的 `GET /api/ai/models` 保留为别名，两者响应完全一致）。
 - 优先级：`runtime_config.json` > 环境变量（`OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`）> 内置 Mock。
 - `api_key` 三态语义：键**缺省**=保持不变、传 `""` 空串=保持不变、传 `null`=清除——前端靠它避免误清 Key。
@@ -664,6 +664,103 @@ def _navigation_response(self, index_path: Path, scope) -> Response:
 > 因为 `index.html` 里用的是相对路径，深链下它的解析基准本身就是错的。
 > 真正的解法是两步：资源类请求真 404 不回退，页面导航回退时在**响应体里**注入 `<base>` 标签把基准掰回应用根。
 > 现在 `/nope/deep` 的挂载节点数从 0 变成 1，控制台零报错，而且磁盘上的构建产物一个字节都没改。」
+
+---
+
+## 难点六：配置中心显示「连接成功」，对话却始终降级
+
+### 背景现象
+
+V2 的配置中心（齿轮弹窗）设计了三段式反馈：填 Base URL 与 Key → 点「测试连接」→ 显示
+「连接成功 · 74ms · 发现 **205 个模型**」。用户照此保存，然后发现**每次对话和推演都还是
+【离线降级策略】**。
+
+界面说成功，行为说失败——这是最难查的一类问题：两边都没有报错。
+
+### 排查过程
+
+**第一步：先确认不是前端问题。** 直接打接口，后端返回与界面一致：
+```bash
+curl -s http://<host>:8000/api/models      # configured=true, degraded=false, 205 个模型
+curl -s -X POST http://<host>:8000/api/config/test   # ok=true, latency_ms=74, models=[205 条]
+```
+列表接口完全正常，所以问题不在网络、不在 Key。
+
+**第二步：看推演到底报什么错。** 调 `POST /api/reasoning/simulate`，降级原因写在 `error` 里：
+```
+大模型调用失败（已重试 1 次）：HTTPStatusError: Server error '503 Service Unavailable'
+for url 'https://<网关>/v1/chat/completions'
+```
+503 说明**网关自己**在拒绝——不是网络不通，也不是鉴权失败。
+
+**第三步：把请求拆开单独打。** 在容器内直接用当前配置打网关，一次问一个问题：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /models` | **200**，列出 205 个模型 |
+| `POST /chat/completions`，`model=qwen3-30b-a3b-thinking-2507`（界面默认选中的） | **502** `Model qwen3-30b-a3b-thinking-2507 has been retired on 2026-07-07 and is no longer available.` |
+| `POST /chat/completions`，`model=deepseek-ai/DeepSeek-V4-Flash` | **200**，正常返回 |
+
+根因浮出水面：**网关的 `/models` 列表包含大量已被上游下线的模型**。它照样把模型名列出来，
+只有真正发起推理时才回 502/503。抽查 16 个模型，可用与已退役的**混在同一个列表里**：
+
+| 可用 | 已下线 / 无权限 |
+|---|---|
+| `deepseek-ai/DeepSeek-V4-Flash` | `qwen3-30b-a3b-thinking-2507`（2026-07-07 退役） |
+| `qwen/qwen3.7-flash` | `qwen-turbo`（2026-07-08 退役） |
+| `qwen/qwen3.6-plus` | `meituan/longcat-flash-lite`（2026-06-02 退役） |
+| `Qwen/Qwen3.5-122B-A10B` | `doubao-1.5-vision-pro`（2026-03-31 退役） |
+| `Qwen/Qwen3-30B-A3B-Instruct-2507` | `moonshotai/kimi-k2-thinking`（2026-07-01 退役） |
+| `tencent/Hunyuan-A13B-Instruct` | `kimi-k2.8-code`（403 订阅不含） |
+| `Qwen/Qwen2.5-72B-Instruct-128K` | `mimo-v2.5`（404 不存在）、`deepseek-v3`（400 disabled） |
+
+### 根因分析
+
+1. **探活测错了对象**。原实现只打 `GET /models`，验证的是「地址通、Key 有效」，而用户真正
+   关心的是「**我选的这个模型能不能用**」。两者在正规厂商 API 上通常一致，在中转网关上是两回事。
+2. **列表接口不代表可用性**。网关聚合多个上游，模型退役后列表元数据没同步，形成
+   「列得出、调不通」的僵尸条目。
+3. **错误被三层降级吃掉了**。`llm.chat` / `llm.complete_json` 的铁律是「任何异常都收敛成降级结果，
+   绝不冒泡 5xx」——这条铁律本身是对的（演示不能崩），但副作用是**失败静默**：
+   界面上只看得到「已降级」，看不到「因为模型退役」。
+
+### 解决方案
+
+**后端：探活分两段，第二段实测所选模型。**
+`backend/app/runtime_config.py` 的 `probe()` 在拿到模型列表后，追加一个 1 token 的最小调用：
+```python
+probe_body = {"model": chosen, "messages": [{"role": "user", "content": "ping"}],
+              "max_tokens": 1, "temperature": 0}
+```
+把上游错误体压成一行可读文案（`_upstream_message`），返回三个新字段：
+`model_ok`（bool｜未指定模型时为 `null`）、`tested_model`、`model_error`。
+沿用同一条铁律：任何异常都收敛成 `model_ok=false`，**绝不 5xx**。
+
+**前端：把「成功」拆成两种。** 只有 `ok && model_ok !== false` 才算通过；
+`model_ok === false` 时显示「接口连通（74ms · 205 个模型），但所选模型 X 调用失败：… ——
+请换一个模型再保存」。未指定模型（`model_ok === null`）不报警，只说「尚未指定模型，未做调用验证」。
+
+**默认值：不再让「不选」等于「必然降级」。** 之前未选模型时后端回落 `mock-agronomist`，
+拿这个 id 去打真实端点必然失败。现在只要 Key 已配置，前端就预选第一个非向量模型，
+并把「不指定模型」这一项如实标注为「后端回落 mock-agronomist，真实端点会失败并降级」。
+
+### 量化收益
+
+| 指标 | 改造前 | 改造后 |
+|---|---|---|
+| 列表通、模型退役时的界面提示 | 「连接成功 · 74ms · 发现 205 个模型」 | 「接口连通，但所选模型 X 调用失败：HTTP 502 Model … has been retired —— 请换一个模型再保存」 |
+| 定位「为什么一直降级」所需步骤 | 需要读后端源码 + 手工 curl 网关 | 界面一行字 + 一次「测试连接」 |
+| 未选模型时的行为 | 静默选 `mock-agronomist`，真实端点必然降级 | 预选第一个可用模型；仍可选默认并看到明确警告 |
+| 探活接口额外字段 | —— | `model_ok` / `tested_model` / `model_error`（未指定模型时为 `null`，不误报） |
+| 失败是否仍返回 200 | 是 | **是**（降级铁律未变，只是把原因说清楚） |
+
+### 一句话演讲口径
+
+> 「这个 bug 最难的地方在于**两边都没报错**：界面说连接成功，对话说已降级。
+> 根因是中转网关把已经下线的模型照样列在 `/models` 里——列表接口是 200，真去推理才 502。
+> 我们原来的探活只验证了『地址通、Key 有效』，没有验证『你选的那个模型能不能用』。
+> 修法是探活分两段：先拉列表，再用 1 个 token 实测所选模型。
+> 这也让我们更信一条原则：**降级可以静默，但降级的原因不能静默。**」
 
 ---
 

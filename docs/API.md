@@ -726,7 +726,9 @@ curl -s -X PUT http://127.0.0.1:8000/api/config \
 
 ## POST /api/config/test
 
-用**当前生效配置**探活 `GET {base_url}/models`。**失败也返回 200**（`ok=false`），绝不 5xx。
+用**当前生效配置**探活 `GET {base_url}/models`，**并额外用 1 token 的最小请求实测「当前所选模型」是否真的可调用**。**失败也返回 200**（`ok=false`），绝不 5xx。
+
+> 为什么列表通了还要单独测模型：中转网关常把**已被上游下线的模型**照样列在 `/models` 里。此时列表接口 200、用户看到「连接成功」，但每次对话/推演都必然 502/503 并静默降级。只测列表不足以判断可用性。
 
 **请求**（无请求体）
 
@@ -734,7 +736,7 @@ curl -s -X PUT http://127.0.0.1:8000/api/config \
 curl -s -X POST http://127.0.0.1:8000/api/config/test
 ```
 
-**响应 200 — 三种实测情况**
+**响应 200 — 四种实测情况**
 
 未配置 `base_url`：
 
@@ -753,18 +755,46 @@ curl -s -X POST http://127.0.0.1:8000/api/config/test
 }
 ```
 
-探活成功：
+探活成功、且所选模型可调用：
 
 ```json
-{ "ok": true, "latency_ms": 231, "models": ["qwen-plus", "qwen-turbo"], "error": null }
+{
+  "ok": true,
+  "latency_ms": 231,
+  "models": ["qwen-plus", "qwen-turbo"],
+  "error": null,
+  "model_ok": true,
+  "tested_model": "qwen-plus",
+  "model_error": null
+}
 ```
+
+**列表通、但所选模型已被上游下线**（真实踩坑：中转网关列出 205 个模型，其中 `qwen3-30b-a3b-thinking-2507` 已于 2026-07-07 退役）：
+
+```json
+{
+  "ok": true,
+  "latency_ms": 74,
+  "models": ["Qwen/Qwen3-30B-A3B-Instruct-2507", "..."],
+  "error": null,
+  "model_ok": false,
+  "tested_model": "qwen3-30b-a3b-thinking-2507",
+  "model_error": "HTTP 502: Model qwen3-30b-a3b-thinking-2507 has been retired on 2026-07-07 and is no longer available. Please use another model."
+}
+```
+
+> `ok=true` 只代表**接口地址与 Key 可用**；是否真能推理要看 `model_ok`。前端据此把结果渲染成
+> 「接口连通，但所选模型 X 调用失败：… —— 请换一个模型再保存」，而不是误报「连接成功」。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `ok` | bool | 是否探活成功 |
-| `latency_ms` | int | 本次探活耗时毫秒 |
+| `ok` | bool | `GET {base_url}/models` 是否成功 |
+| `latency_ms` | int | 列表请求耗时毫秒 |
 | `models` | string[] | 从响应 `data[].id` 抽取的模型 id 列表；失败为空数组 |
-| `error` | string \| null | 失败原因（`类型名: 消息`），成功为 `null` |
+| `error` | string \| null | 列表请求失败原因（`类型名: 消息`），成功为 `null` |
+| `model_ok` | bool \| null | 所选模型是否可调用；**未指定模型时为 `null`**（不做调用验证，不算失败） |
+| `tested_model` | string \| null | 本次实测的模型 id；未指定模型时为 `null` |
+| `model_error` | string \| null | 模型调用失败原因，已把上游错误体压成一行可读文案 |
 
 > 探活超时用的是 `OPENAI_TIMEOUT_SECONDS`（默认 20s），**不是** `REASONING_TIMEOUT_SECONDS`。
 

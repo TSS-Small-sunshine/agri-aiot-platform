@@ -464,7 +464,7 @@ simulator（4 台设备 + 气象 Mock + 指令执行）
 |---|---|---|
 | GET | /api/config | 当前生效配置（`api_key` 只回显掩码） |
 | PUT | /api/config | 写运行时配置并**立即热生效**（无需重启容器） |
-| POST | /api/config/test | 用当前配置探活，失败也返回 200 + `ok=false` |
+| POST | /api/config/test | 探活 `/models` 并实测所选模型可调用性（`model_ok`），失败也返回 200 + `ok=false` |
 | GET | /api/models | 运行时模型列表（与 `GET /api/ai/models` 同源同结构，后者保留为别名） |
 | POST | /api/reasoning/simulate | 因果推演（三段式降级，**永不 5xx**） |
 | GET | /api/reasoning/history | 推演历史摘要（主键字段为 `reasoning_id`，不含完整 prompt） |

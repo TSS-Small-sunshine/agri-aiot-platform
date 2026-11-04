@@ -156,7 +156,12 @@ def update(payload: dict) -> dict:
 
 
 async def probe() -> dict:
-    """POST /api/config/test：用当前配置探活 {base_url}/models。任何异常都收敛成 ok=false。"""
+    """POST /api/config/test：探活 {base_url}/models，并额外验证**当前所选模型**是否可调用。
+
+    只测 /models 是不够的：中转网关会列出已被上游下线的模型，此时列表接口 200、
+    但真正调用必然 502/503。若不额外验证，用户会看到「连接成功」却每次对话都降级。
+    任何异常都收敛成 ok=false / model_ok=false，绝不 5xx。
+    """
     data = resolve()
     base_url = data.get("base_url")
     if not base_url:
@@ -182,7 +187,6 @@ async def probe() -> dict:
                     models.append(str(entry["id"]))
                 elif isinstance(entry, str):
                     models.append(entry)
-        return {"ok": True, "latency_ms": latency, "models": models, "error": None}
     except Exception as exc:  # noqa: BLE001 —— 探活失败必须 200，不得 5xx
         latency = int((time.perf_counter() - started) * 1000)
         return {
@@ -190,4 +194,48 @@ async def probe() -> dict:
             "latency_ms": latency,
             "models": [],
             "error": f"{type(exc).__name__}: {exc}",
+            "model_ok": None,
+            "tested_model": None,
+            "model_error": None,
         }
+
+    result = {"ok": True, "latency_ms": latency, "models": models, "error": None,
+              "model_ok": None, "tested_model": None, "model_error": None}
+
+    # 列表能列出 ≠ 能调用。这里用 1 token 的最小请求实测所选模型。
+    chosen = data.get("model")
+    if not chosen:
+        return result
+    result["tested_model"] = chosen
+    probe_body = {
+        "model": chosen,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=config.OPENAI_TIMEOUT_SECONDS) as client:
+            r2 = await client.post(f"{base_url}/chat/completions", headers=headers, json=probe_body)
+        if r2.status_code >= 400:
+            result["model_ok"] = False
+            result["model_error"] = _upstream_message(r2)
+        else:
+            result["model_ok"] = True
+    except Exception as exc:  # noqa: BLE001 —— 模型探活失败同样不得 5xx
+        result["model_ok"] = False
+        result["model_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def _upstream_message(resp) -> str:
+    """把上游错误体压成一行可读文案（中转网关常见：模型已下线）。"""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 —— 非 JSON 错误体
+        return f"HTTP {resp.status_code}: {(resp.text or '')[:200]}"
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, dict) and err.get("message"):
+        return f"HTTP {resp.status_code}: {str(err['message'])[:300]}"
+    if isinstance(err, str):
+        return f"HTTP {resp.status_code}: {err[:300]}"
+    return f"HTTP {resp.status_code}: {str(payload)[:200]}"

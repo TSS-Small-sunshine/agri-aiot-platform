@@ -1090,6 +1090,7 @@ http://<服务器IP>:8000
 | 13 | `docker compose up -d` 报 `not a directory: Are you trying to mount a directory onto a file (or vice-versa)?` | 上传文件前 `./mosquitto/` 目录不存在，Docker 会把 bind 源 `./mosquitto/mosquitto.conf` **自动创建成一个目录**；此后往这个路径传文件必然失败 | `cd ~/agri-aiot-platform && rm -rf mosquitto && mkdir -p mosquitto`，重新 `scp mosquitto/mosquitto.conf root@<你的公网IP>:~/agri-aiot-platform/mosquitto/`，再 `docker compose up -d`（[6.5](#65-上传部署文件) 的 `mkdir -p` 就是为了避开这个坑） |
 | 14 | 在齿轮弹窗里填了 Key 并保存，但推演还是【离线降级策略】 | 保存的配置没生效，或 `RUNTIME_CONFIG_PATH` 指向了不可写的路径 | `curl -s http://127.0.0.1:8000/api/config` 看 `configured` 是否为 `true`、`source` 是否为 `runtime`、`path` 指向哪里；`docker compose exec backend ls -ld $(dirname <path>)` 确认可写；容器内该路径必须落在 `agri-data` 卷（默认 `/data/runtime_config.json`） |
 | 15 | `POST /api/config/test` 一直 `ok=false` | 地址不对（少 `/v1`）、Key 无效、或容器出不了网 | 看返回的 `error`：`404` = Base URL 少 `/v1`；`401` = Key 错/过期；`ConnectError` = 地址不通。容器内连本机 Ollama 要用 `host.docker.internal` 而不是 `localhost` |
+| 18 | 齿轮弹窗里「测试连接」显示成功，但对话/推演仍是【离线降级策略】 | **列表通 ≠ 所选模型能调用**：中转网关会把已被上游下线的模型照样列在 `/models` 里，调用时才返回 502 `Model ... has been retired` | 看「测试连接」的结果行——若写着「接口连通，但所选模型 X 调用失败」，就**换一个模型再保存**。也可直接 `curl -s -X POST http://127.0.0.1:8000/api/config/test` 看 `model_ok`。同一个网关里可用与已退役的模型常常混在一起，逐个试是正常操作 |
 | 16 | 指令一直停在 `dispatched`，30 秒后变 `timeout` | 模拟器没订阅到指令（broker 不通），或指令发给了模拟器未模拟的设备 | `docker compose logs -f simulator` 看有没有『已订阅下行指令』与『收到指令』；`docker compose exec mosquitto mosquitto_sub -h 127.0.0.1 -t 'agri/command/+/+' -v -C 1` 抓一条；确认 `device_code` 在 `SIM_DEVICES` 里；必要时调大 `COMMAND_ACK_TIMEOUT_SECONDS` |
 | 17 | 推演树的节点文字被画布裁切 / 深链刷新白屏 | 分别是 ECharts graph 包围盒不含 symbolSize、以及 SPA 回退把相对路径产物解析到错误层级 | 这两个问题**本项目已修**，详见 [CHANGELOG 难点四、难点五](CHANGELOG.md)。若你改过 `frontend/src/components/ReasoningTree.vue` 或 `backend/app/main.py` 的回退逻辑，请对照那两节恢复 |
 
@@ -1119,7 +1120,7 @@ http://<服务器IP>:8000
 |---|---|---|
 | GET | `/api/config` | 当前生效的大模型配置（Key **只回显掩码**） |
 | PUT | `/api/config` | 写入配置并**热生效**（无需重启容器） |
-| POST | `/api/config/test` | 用当前配置探活并列出模型 |
+| POST | `/api/config/test` | 探活并列出模型，**并实测所选模型能否调用**（`model_ok`） |
 | GET | `/api/models` | 运行时模型列表（`/api/ai/models` 保留为别名） |
 | POST | `/api/reasoning/simulate` | Context Engineering 推演，返回推演树 |
 | GET | `/api/reasoning/history` | 推演历史摘要列表 |
