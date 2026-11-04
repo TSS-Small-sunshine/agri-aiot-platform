@@ -2,7 +2,7 @@
 
 > 本文是**设计文档**，用于交付说明与答辩讲解：给出项目目录结构、SQLite 数据库设计、告警阈值规则、MQTT 主题约定、REST 接口清单与环境变量。
 > **实现细节以 [docs/CONTRACT.md](CONTRACT.md)（冻结版契约，唯一真相）与源码为准**；本文若与二者不一致，以后者为准。
-> 目录树已与仓库受版本控制的 **81 个文件**（`git ls-files`）双向对齐；8 张表的 DDL 已与 `backend/app/db.py` 的 DDL 常量做空白归一后逐字比对（identical: True）。
+> 目录树已与仓库受版本控制的 **83 个文件**（`git ls-files`）双向对齐；8 张表的 DDL 已与 `backend/app/db.py` 的 DDL 常量做空白归一后逐字比对（identical: True）。
 
 ## 一、项目目录结构
 
