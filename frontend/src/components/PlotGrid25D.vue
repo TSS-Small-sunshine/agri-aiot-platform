@@ -2,7 +2,7 @@
   <div class="panel pg">
     <div class="panel-title">
       <span class="t-left"><span class="bar"></span>地块 2.5D 总览</span>
-      <span class="sub">{{ plots.length }} 个地块 · 点击地块触发推演</span>
+      <span class="sub">{{ plots.length }} 个地块 · 点击触发推演</span>
     </div>
 
     <div v-if="loading" class="pg-stage">
@@ -13,33 +13,40 @@
 
     <div v-else-if="!plots.length" class="empty">暂无地块数据</div>
 
-    <div v-else class="pg-stage">
-      <!-- 纯 CSS 3D：perspective 提供景深，内层 rotateX(55deg) 把平面压成俯视地块 -->
-      <div class="pg-scene">
-        <div class="pg-plane" :style="planeStyle">
-          <button
-            v-for="p in plots"
-            :key="p.plot_code"
-            class="tile"
-            :class="{ active: p.plot_code === selected, alert: plotLevel(p) === 'high' }"
-            :style="tileStyle(p)"
-            type="button"
-            @click="select(p)"
-          >
-            <span class="tile-code mono">{{ p.plot_code }}</span>
-            <span class="tile-name nowrap">{{ p.name || p.plot_name }}</span>
-            <span class="tile-crop nowrap">{{ p.crop || '--' }}</span>
-            <span class="tile-foot mono">
-              <span class="dot" :class="plotOnline(p) ? 'online' : 'offline'"></span>
-              {{ onlineCount(p) }}/{{ deviceCount(p) }} 在线
-            </span>
-            <span class="tile-area mono">{{ p.area_mu != null ? p.area_mu + ' 亩' : '--' }}</span>
-            <span class="tile-stage nowrap">{{ p.stage || '' }}</span>
-          </button>
+    <!-- 提示语必须是 .pg-stage 的兄弟而非子元素：.pg-stage 是 row 方向的 flex 容器，
+         提示语作为子项会按 flex-basis:auto 抢走约一半宽度，把舞台从 276px 压到 125px，
+         地块卡只剩 60px 宽 —— 中文被省略号截断并相互重叠。 -->
+    <template v-else>
+      <div class="pg-stage">
+        <!-- 纯 CSS 3D：perspective 提供景深，内层 rotateX(55deg) 把平面压成俯视地块 -->
+        <div class="pg-scene">
+          <div class="pg-plane" :style="planeStyle">
+            <button
+              v-for="p in plots"
+              :key="p.plot_code"
+              class="tile"
+              :class="{ active: p.plot_code === selected, alert: plotLevel(p) === 'high' }"
+              :style="tileStyle(p)"
+              type="button"
+              @click="select(p)"
+            >
+              <span class="tile-code mono">{{ p.plot_code }}</span>
+              <span class="tile-name nowrap">{{ p.name || p.plot_name }}</span>
+              <span class="tile-crop nowrap">{{ p.crop || '--' }}</span>
+              <span class="tile-foot">
+                <span class="dot" :class="plotOnline(p) ? 'online' : 'offline'"></span>
+                <span class="nowrap">{{ onlineCount(p) }}/{{ deviceCount(p) }} 在线</span>
+              </span>
+              <span class="tile-meta mono nowrap">
+                {{ p.area_mu != null ? p.area_mu + ' 亩' : '--' }}
+                <template v-if="p.stage"> · {{ p.stage }}</template>
+              </span>
+            </button>
+          </div>
         </div>
       </div>
-      <p class="pg-hint">拖动/缩放未开放；点击地块即在右侧因果树推演该地块的当前态势。</p>
-    </div>
+      <p class="pg-hint">点击地块触发推演 · 拖动/缩放未开放</p>
+    </template>
   </div>
 </template>
 
@@ -91,17 +98,23 @@ function select(p) {
 
 <style scoped>
 .pg { display: flex; flex-direction: column; min-height: 260px; }
-.pg-stage { flex: 1; display: flex; align-items: center; justify-content: center; padding: 6px 2px; }
+.pg-stage { flex: 1; display: flex; align-items: center; justify-content: center; padding: 4px 0; min-height: 0; }
 
-/* 3D 舞台 */
+/* 3D 舞台：占满 stage 全宽（不能留 flex 兄弟抢宽度） */
 .pg-scene {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
   perspective: 900px;
   perspective-origin: 50% 30%;
 }
 .pg-plane {
+  flex: 1;
+  height: 100%;
   display: grid;
-  gap: 12px;
+  gap: 10px;
   transform: rotateX(55deg);
   transform-style: preserve-3d;
   transition: transform 0.35s ease;
@@ -110,8 +123,9 @@ function select(p) {
 
 .tile {
   position: relative;
-  display: flex; flex-direction: column; gap: 1px;
-  min-height: 76px;
+  display: flex; flex-direction: column; gap: 0;
+  min-height: 0;
+  min-width: 0;
   padding: 7px 9px;
   text-align: left;
   font-family: inherit;
@@ -142,13 +156,12 @@ function select(p) {
   background: var(--v2-red); box-shadow: 0 0 8px var(--v2-red);
   animation: v2-breathe-red 1.4s ease-in-out infinite;
 }
-.tile-code { font-size: 10px; color: var(--v2-cyan); letter-spacing: 0.1em; }
-.tile-name { font-size: 12.5px; font-weight: 600; }
-.tile-crop { font-size: 10.5px; color: var(--v2-sub); }
-.tile-foot { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--v2-sub); margin-top: auto; }
-.tile-area { font-size: 10px; color: var(--v2-sub); }
-.tile-stage { font-size: 10px; color: var(--v2-sub); }
+.tile-code { font-size: 10px; line-height: 1.5; color: var(--v2-cyan); letter-spacing: 0.08em; }
+.tile-name { font-size: 13px; line-height: 1.4; font-weight: 600; }
+.tile-crop { font-size: 11px; line-height: 1.4; color: var(--v2-sub); }
+.tile-foot { display: flex; align-items: center; gap: 4px; font-size: 10.5px; line-height: 1.5; color: var(--v2-sub); margin-top: auto; min-width: 0; }
+.tile-meta { font-size: 10.5px; line-height: 1.5; color: var(--v2-sub); }
 
 .sk-tile { min-height: 76px; }
-.pg-hint { margin: 4px 0 0; font-size: 10.5px; color: var(--v2-sub); text-align: center; }
+.pg-hint { margin: 2px 0 0; font-size: 10.5px; color: var(--v2-sub); text-align: center; }
 </style>
